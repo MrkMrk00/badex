@@ -1,0 +1,6 @@
+BasedOnStyle: Mozilla
+ColumnLimit: 160
+IndentWidth: 4
+AlwaysBreakAfterReturnType: None
+AlwaysBreakAfterDefinitionReturnType: None
+AllowShortFunctionsOnASingleLine: Empty
