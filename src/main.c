@@ -28,7 +28,7 @@ static void on_ready(ServerContext* ctx, int sock_fd)
 
     BX_PASSERT(bytes_read > 0);
     if (bytes_read == max_bytes) {
-        BX_LOG("NOTICE", "message from \"%d\" too long", sock_fd);
+        BX_NOTICE("message from \"%d\" too long", sock_fd);
     }
 
     buf[bytes_read] = 0;
@@ -45,9 +45,7 @@ int main(void)
     ServerContext* ctx = NULL;
     int err = server_context_create(&ctx, INADDR_LOCALHOST, 1234);
     if (err < 0) {
-        BX_LOG("FATAL", "failed to create server context - %s\n", strerror(-err));
-
-        return 1;
+        BX_FATAL("failed to create server context - %s\n", strerror(-err));
     }
 
 #ifdef THREADING

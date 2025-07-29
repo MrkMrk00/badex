@@ -1,5 +1,6 @@
 PROGRAM     := server
 CC          := clang
+DEBUGGER    := lldb
 
 SRCS        := \
 	src/main.c \
@@ -9,11 +10,17 @@ BUILD_DIR   := build
 OBJS        := $(patsubst src/%.c, $(BUILD_DIR)/%.o, $(SRCS))
 DEPS        := $(OBJS:.o=.d)
 
-CFLAGS      := -Wall -Wpedantic -Werror -march=native -MMD -MP -glldb
+CFLAGS      := -Wall -Wpedantic -Werror -march=native -MMD -MP
 INC_DIRS    := -Isrc
 
 ifeq ($(THREADING),1)
 CFLAGS += -DTHREADING
+endif
+
+ifeq ($(DEBUG),1)
+CFLAGS += -DDEBUG -g$(DEBUGGER) -O0
+else
+CFLAGS += -O3
 endif
 
 $(PROGRAM): $(OBJS)
