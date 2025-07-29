@@ -16,6 +16,7 @@ typedef void (*OnReadyFunc)(ServerContext* ctx, int sock_fd);
 // Returns: 0 on success; -errno on failure
 // If the reason for failing is out of the user's control, exits the program.
 int server_context_create(ServerContext** ctx_out, uint32_t address, uint16_t port);
+void server_context_dispose(ServerContext**);
 
 void server_run_sync(ServerContext*, OnReadyFunc on_ready);
 pthread_t server_run_detached(ServerContext*, OnReadyFunc on_ready);

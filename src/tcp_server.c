@@ -95,6 +95,16 @@ int server_context_create(ServerContext** ctx_out, uint32_t address, uint16_t po
     return 0;
 }
 
+void server_context_dispose(ServerContext** ctx)
+{
+    BX_ASSERT(ctx != NULL, "expected a non-NULL ServerContext pointer");
+
+    if ((*ctx) != NULL) {
+        free(*ctx);
+        (*ctx) = NULL;
+    }
+}
+
 void server_run_sync(ServerContext* ctx, OnReadyFunc on_ready)
 {
     BX_ASSERT(ctx->loop_kind == SL_STOPPED, "the server was already started");

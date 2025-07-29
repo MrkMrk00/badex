@@ -59,5 +59,7 @@ int main(void)
     server_run_sync(ctx, on_ready);
 #endif
 
+    server_context_dispose(&ctx);
+
     return 0;
 }

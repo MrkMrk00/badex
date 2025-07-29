@@ -9,7 +9,7 @@ BUILD_DIR   := build
 OBJS        := $(patsubst src/%.c, $(BUILD_DIR)/%.o, $(SRCS))
 DEPS        := $(OBJS:.o=.d)
 
-CFLAGS      := -Wall -Wpedantic -Werror -march=native -MMD -MP
+CFLAGS      := -Wall -Wpedantic -Werror -march=native -MMD -MP -glldb
 INC_DIRS    := -Isrc
 
 ifeq ($(THREADING),1)
