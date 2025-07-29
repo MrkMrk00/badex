@@ -1,4 +1,10 @@
-SRCS:=src/main.c src/tcp_server.c
+CC := clang
+SRCS :=\
+	src/main.c\
+	src/tcp_server.c\
+
+CFLAGS := -Wall -Wpedantic -Werror -march=native -glldb
+INC_DIRS := -I./src
 
 server: $(SRCS)
-	cc -Isrc -march=native -O3 -Wall -Wpedantic -Werror -o server $^
+	$(CC) $(CFLAGS) $(INC_DIRS) $^ -o $@
