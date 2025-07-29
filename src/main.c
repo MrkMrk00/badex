@@ -11,18 +11,16 @@
 #endif
 
 #define TCP_RECV_BUF_SIZE 2048
-const uint32_t INADDR_LOCALHOST = (127 << 24) + 1;
-const unsigned char EOF_BYTE = 0x4;
+static const uint32_t INADDR_LOCALHOST = (127 << 24) + 1;
+static const unsigned char EOT = 0x4;
 
-void on_ready(ServerContext* ctx, int sock_fd)
+static void on_ready(ServerContext* ctx, int sock_fd)
 {
     char buf[TCP_RECV_BUF_SIZE] = { 0 };
     const size_t max_bytes = sizeof(buf) - 1;
 
     ssize_t bytes_read = recv(sock_fd, buf, max_bytes, 0);
-    if (bytes_read == 0 || (bytes_read == 1 && buf[bytes_read - 1] == EOF_BYTE)) {
-        BX_LOG("INFO", "client disconnected %d\n", sock_fd);
-
+    if (bytes_read == 0 || (bytes_read == 1 && buf[bytes_read - 1] == EOT)) {
         server_disconnect_client(ctx, sock_fd);
 
         return;
@@ -44,7 +42,14 @@ void on_ready(ServerContext* ctx, int sock_fd)
 
 int main(void)
 {
-    ServerContext* ctx = server_context_create(INADDR_LOCALHOST, 8080);
+    ServerContext* ctx = NULL;
+    int err = server_context_create(&ctx, INADDR_LOCALHOST, 1234);
+    if (err < 0) {
+        BX_LOG("FATAL", "failed to create server context - %s\n", strerror(-err));
+
+        return 1;
+    }
+
 #ifdef THREADING
     pthread_t thread = server_run_detached(ctx, on_ready);
 

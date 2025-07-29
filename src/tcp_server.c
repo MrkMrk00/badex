@@ -40,8 +40,10 @@ struct server_context_t
     pthread_t thread;
 };
 
-ServerContext* server_context_create(uint32_t address, uint16_t port)
+int server_context_create(ServerContext** ctx_out, uint32_t address, uint16_t port)
 {
+    BX_ASSERT(ctx_out != NULL, "expected a non-NULL ctx_out parameter");
+
     int sock_fd;
     BX_PASSERT((sock_fd = socket(AF_INET, SOCK_STREAM, 0)) != -1);
 
@@ -59,17 +61,38 @@ ServerContext* server_context_create(uint32_t address, uint16_t port)
     addr.sin_port = htons(port);
 
     // bind the socket to the specified address and port (from args `address` and `port`)
-    BX_PASSERT(bind(sock_fd, (struct sockaddr*)&addr, sizeof(struct sockaddr_in)) != -1);
+    int bind_ret = bind(sock_fd, (struct sockaddr*)&addr, sizeof(struct sockaddr_in));
+    if (bind_ret == -1) {
+        // if the error has something to do with the user-provided arguments
+        // return the error
+        switch (errno) {
+            case EACCES:
+            case EADDRINUSE:
+            case EADDRNOTAVAIL:
+            case EAFNOSUPPORT:
+            case EFAULT:
+                return -errno;
+
+            default:
+                BX_PFATAL(NULL);
+        };
+    }
 
     // start listening for incomming TCP connections
     BX_PASSERT(listen(sock_fd, CLIENT_QUEUE_MAX_SIZE) != -1);
 
-    ServerContext* ctx = malloc(sizeof(ServerContext));
-    memset(ctx, 0, sizeof(ServerContext));
-    ctx->sock_fd = sock_fd;
-    ctx->loop_kind = SL_STOPPED;
+    char addr_as_string[INET_ADDRSTRLEN] = { 0 };
+    inet_ntop(AF_INET, &addr.sin_addr, addr_as_string, sizeof(addr_as_string));
+    BX_LOG("INFO", "TCP server :: LISTENING { fd: %d, addr: \"%s:%d\", listen_queue_size: %d }\n", sock_fd, addr_as_string, port, CLIENT_QUEUE_MAX_SIZE);
 
-    return ctx;
+    (*ctx_out) = malloc(sizeof(ServerContext));
+    BX_ASSERT((*ctx_out) != NULL, "out of memory");
+
+    memset((*ctx_out), 0, sizeof(ServerContext));
+    (*ctx_out)->sock_fd = sock_fd;
+    (*ctx_out)->loop_kind = SL_STOPPED;
+
+    return 0;
 }
 
 void server_run_sync(ServerContext* ctx, OnReadyFunc on_ready)
@@ -98,6 +121,8 @@ void server_disconnect_client(ServerContext* ctx, int client_sock_fd)
 
     BX_PASSERT(close(client_sock_fd) != -1);
     FD_CLR(client_sock_fd, &ctx->client_fdset);
+
+    BX_LOG("INFO", "TCP server :: CLIENT_BYE { fd: %d }\n", client_sock_fd);
 }
 
 void server_close(ServerContext* ctx)
@@ -124,8 +149,6 @@ static void* _server_do_loop(void* arg)
     FD_ZERO(&read_fds);
     FD_ZERO(&write_fds);
 
-    BX_LOG("INFO", "listening for incomming connections (fd: %d, has own thread: %s)\n", ctx->sock_fd, ctx->loop_kind == SL_THREADED ? "true" : "false");
-
     // Wait a bit, to not keep the CPU core on 100 % usage
     struct timeval timeout = {
         .tv_sec = 0,
@@ -133,6 +156,11 @@ static void* _server_do_loop(void* arg)
     };
 
     int max_fd = 0;
+
+    BX_LOG("INFO",
+           "TCP server :: LOOP { threaded: %s, select_timeout: %ld ms }\n",
+           ctx->loop_kind == SL_THREADED ? "true" : "false",
+           (timeout.tv_usec / 1000) + timeout.tv_sec * 1000);
 
     while (ctx->loop_kind != SL_STOPPED) {
         int client_fd = accept(ctx->sock_fd, (struct sockaddr*)&client_addr, &addr_sz);
@@ -143,7 +171,7 @@ static void* _server_do_loop(void* arg)
 
         if (client_fd > 0) {
             inet_ntop(AF_INET, &client_addr.sin_addr, addr_buf, sizeof(addr_buf));
-            BX_LOG("INFO", "new client has connected {fd: %d, ip: %s:%d}\n", client_fd, addr_buf, ntohs(client_addr.sin_port));
+            BX_LOG("INFO", "TCP server :: CLIENT_NEW { fd: %d, ip: \"%s:%d\" }\n", client_fd, addr_buf, ntohs(client_addr.sin_port));
 
             FD_SET(client_fd, &ctx->client_fdset);
 

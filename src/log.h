@@ -1,11 +1,11 @@
 #ifndef SUPPORT_H_
 #define SUPPORT_H_
 
-#define BX_LOG(level, message, ...) printf("%s:%d: [%s]: " message, __FILE__, __LINE__, (level), __VA_ARGS__)
+#define BX_LOG(level, message, ...) printf("%s:%d: [%s] " message, __FILE__, __LINE__, (level), __VA_ARGS__)
 
 #define BX_FATAL(message, ...)                                                                                                                                 \
     do {                                                                                                                                                       \
-        fprintf(stderr, "%s:%d: [FATAL]: " message, __FILE__, __LINE__, __VA_ARGS__);                                                                                   \
+        fprintf(stderr, "%s:%d: [FATAL] " message, __FILE__, __LINE__, __VA_ARGS__);                                                                                   \
         exit(1);                                                                                                                                               \
     } while (0)
 
@@ -18,7 +18,7 @@
 // Print FATAL error message from `errno` (after a libc call) and exit program.
 #define BX_PFATAL(message)                                                                                                                                     \
     do {                                                                                                                                                       \
-        fprintf(stderr, "%s:%d: [FATAL]: ", __FILE__, __LINE__);                                                                                                 \
+        fprintf(stderr, "%s:%d: [FATAL] ", __FILE__, __LINE__);                                                                                                 \
         perror(message);                                                                                                                                       \
         exit(1);                                                                                                                                               \
     } while (0)

@@ -13,8 +13,9 @@ typedef void (*OnReadyFunc)(ServerContext* ctx, int sock_fd);
 // Creates the server context.
 // - creates, binds and starts listening on the socket defined by `address` and `port`
 //
-// When some client is ready to send/recv the `on_ready` callback gets called.
-ServerContext* server_context_create(uint32_t address, uint16_t port);
+// Returns: 0 on success; -errno on failure
+// If the reason for failing is out of the user's control, exits the program.
+int server_context_create(ServerContext** ctx_out, uint32_t address, uint16_t port);
 
 void server_run_sync(ServerContext*, OnReadyFunc on_ready);
 pthread_t server_run_detached(ServerContext*, OnReadyFunc on_ready);
