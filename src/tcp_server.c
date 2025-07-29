@@ -151,7 +151,9 @@ static void* _server_do_loop(void* arg)
 
     struct sockaddr_in client_addr;
     socklen_t addr_sz = sizeof(client_addr);
+#ifdef DEBUG
     char addr_buf[INET_ADDRSTRLEN] = { 0 };
+#endif
 
     FD_ZERO(&ctx->client_fdset);
 
@@ -179,8 +181,10 @@ static void* _server_do_loop(void* arg)
         BX_PASSERT(client_fd != -1 || errno == EWOULDBLOCK);
 
         if (client_fd > 0) {
+#ifdef DEBUG
             inet_ntop(AF_INET, &client_addr.sin_addr, addr_buf, sizeof(addr_buf));
             BX_INFO("TCP server :: CLIENT_NEW { fd: %d, ip: \"%s:%d\" }\n", client_fd, addr_buf, ntohs(client_addr.sin_port));
+#endif
 
             FD_SET(client_fd, &ctx->client_fdset);
 
