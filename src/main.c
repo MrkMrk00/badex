@@ -1,21 +1,14 @@
-#include <errno.h>
-#include <fcntl.h>
-#include <pthread.h>
-#include <stdbool.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/select.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 
 #include "log.h"
 #include "tcp_server.h"
+
+#ifdef THREADING
+#include <pthread.h>
+#endif
 
 #define TCP_RECV_BUF_SIZE 2048
 const uint32_t INADDR_LOCALHOST = (127 << 24) + 1;
@@ -52,12 +45,14 @@ void on_ready(ServerContext* ctx, int sock_fd)
 int main(void)
 {
     ServerContext* ctx = server_context_create(INADDR_LOCALHOST, 8080);
-    server_run_sync(ctx, on_ready);
+#ifdef THREADING
+    pthread_t thread = server_run_detached(ctx, on_ready);
 
-    // pthread_t thread = server_run_detached(ctx, on_ready);
-    //
-    // void* ret = NULL;
-    // pthread_join(thread, ret);
+    void* ret = NULL;
+    pthread_join(thread, ret);
+#else
+    server_run_sync(ctx, on_ready);
+#endif
 
     return 0;
 }

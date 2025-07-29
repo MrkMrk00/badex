@@ -124,7 +124,7 @@ static void* _server_do_loop(void* arg)
     FD_ZERO(&read_fds);
     FD_ZERO(&write_fds);
 
-    BX_LOG("INFO", "listening for incomming connections (fd: %d)\n", ctx->sock_fd);
+    BX_LOG("INFO", "listening for incomming connections (fd: %d, has own thread: %s)\n", ctx->sock_fd, ctx->loop_kind == SL_THREADED ? "true" : "false");
 
     // Wait a bit, to not keep the CPU core on 100 % usage
     struct timeval timeout = {
