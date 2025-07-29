@@ -14,85 +14,100 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
+#include "log.h"
 #include "tcp_server.h"
+
+#define CLIENT_QUEUE_MAX_SIZE 20
 
 // Main loop
 static void* _server_do_loop(void* arg);
 
+typedef enum
+{
+    SL_STOPPED = 0,
+    SL_SYNC,
+    SL_THREADED,
+} ServerLoopKind;
+
 struct server_context_t
 {
     int sock_fd;
-    pthread_t thread;
-    OnReadyFunc on_ready;
+    ServerLoopKind loop_kind;
     fd_set client_fdset;
-    bool should_be_running;
+    OnReadyFunc on_ready;
+
+    // only used when `look_kind` == `SL_THREADED`
+    pthread_t thread;
 };
 
-void* server_join(ServerContext* ctx)
+ServerContext* server_context_create(uint32_t address, uint16_t port)
 {
-    void* ret = NULL;
-    pthread_join(ctx->thread, ret);
+    int sock_fd;
+    BX_PASSERT((sock_fd = socket(AF_INET, SOCK_STREAM, 0)) != -1);
 
-    return ret;
-}
+    // make the socket non-blocking
+    // (if there are no clients waiting to connect, the accept() call returns an error instead of blocking)
+    BX_PASSERT(fcntl(sock_fd, F_SETFL, fcntl(sock_fd, F_GETFL, 0) | O_NONBLOCK) != -1);
 
-ServerContext* server_create(uint32_t address, uint16_t port, OnReadyFunc on_ready)
-{
-    int sock_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (sock_fd == -1) {
-        fprintf(stderr, "ERROR: failed to open a socket\n");
-
-        return NULL;
-    }
-
-    if (fcntl(sock_fd, F_SETFL, fcntl(sock_fd, F_GETFL, 0) | O_NONBLOCK) == -1) {
-        fprintf(stderr, "ERROR: failed to set socket to non-blocking - %s\n", strerror(errno));
-
-        return NULL;
-    }
-
+    // reuse the address
     int yes = 1;
-    setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int));
+    BX_PASSERT(setsockopt(sock_fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(int)) != -1);
 
     struct sockaddr_in addr = { 0 };
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(address);
     addr.sin_port = htons(port);
 
-    if (bind(sock_fd, (struct sockaddr*)&addr, sizeof(struct sockaddr_in)) == -1) {
-        fprintf(stderr, "ERROR: %d failed to bind to address %x - %s\n", errno, addr.sin_addr.s_addr, strerror(errno));
+    // bind the socket to the specified address and port (from args `address` and `port`)
+    BX_PASSERT(bind(sock_fd, (struct sockaddr*)&addr, sizeof(struct sockaddr_in)) != -1);
 
-        return NULL;
-    }
-
-    if (listen(sock_fd, 20) == -1) {
-        fprintf(stderr, "ERROR: failed to listen on socket - %s\n", strerror(errno));
-
-        return NULL;
-    }
+    // start listening for incomming TCP connections
+    BX_PASSERT(listen(sock_fd, CLIENT_QUEUE_MAX_SIZE) != -1);
 
     ServerContext* ctx = malloc(sizeof(ServerContext));
     memset(ctx, 0, sizeof(ServerContext));
     ctx->sock_fd = sock_fd;
-    ctx->on_ready = on_ready;
-    ctx->should_be_running = true;
-
-    pthread_create(&ctx->thread, NULL, _server_do_loop, ctx);
+    ctx->loop_kind = SL_STOPPED;
 
     return ctx;
 }
 
+void server_run_sync(ServerContext* ctx, OnReadyFunc on_ready)
+{
+    BX_ASSERT(ctx->loop_kind == SL_STOPPED, "the server was already started");
+    ctx->on_ready = on_ready;
+    ctx->loop_kind = SL_SYNC;
+
+    _server_do_loop((void*)ctx);
+}
+
+pthread_t server_run_detached(ServerContext* ctx, OnReadyFunc on_ready)
+{
+    BX_ASSERT(ctx->loop_kind == SL_STOPPED, "the server was already started");
+    ctx->on_ready = on_ready;
+    ctx->loop_kind = SL_THREADED;
+
+    pthread_create(&ctx->thread, NULL, _server_do_loop, (void*)ctx);
+
+    return ctx->thread;
+}
+
 void server_disconnect_client(ServerContext* ctx, int client_sock_fd)
 {
-    close(client_sock_fd);
+    BX_ASSERT(FD_ISSET(client_sock_fd, &ctx->client_fdset), "this socket fd is not manged by this server");
+
+    BX_PASSERT(close(client_sock_fd) != -1);
     FD_CLR(client_sock_fd, &ctx->client_fdset);
 }
 
 void server_close(ServerContext* ctx)
 {
-    ctx->should_be_running = false;
-    close(ctx->sock_fd);
-    free(ctx);
+    ctx->loop_kind = SL_STOPPED;
+
+    if (ctx->sock_fd > 0) {
+        close(ctx->sock_fd);
+    }
+    ctx->sock_fd = -1;
 }
 
 static void* _server_do_loop(void* arg)
@@ -100,30 +115,36 @@ static void* _server_do_loop(void* arg)
     ServerContext* ctx = (ServerContext*)arg;
 
     struct sockaddr_in client_addr;
-    socklen_t client_addr_len = sizeof(client_addr);
+    socklen_t addr_sz = sizeof(client_addr);
+    char addr_buf[INET_ADDRSTRLEN] = { 0 };
 
     FD_ZERO(&ctx->client_fdset);
 
-    fd_set read_fds;
+    fd_set read_fds, write_fds;
     FD_ZERO(&read_fds);
+    FD_ZERO(&write_fds);
 
+    BX_LOG("INFO", "listening for incomming connections (fd: %d)\n", ctx->sock_fd);
+
+    // Wait a bit, to not keep the CPU core on 100 % usage
     struct timeval timeout = {
         .tv_sec = 0,
-        .tv_usec = 20000, // 20 ms
+        .tv_usec = 10000, // 10 ms
     };
-
-    printf("INFO: listening for incomming connections (fd: %d)\n", ctx->sock_fd);
 
     int max_fd = 0;
 
-    while (ctx->should_be_running) {
-        int client_fd = accept(ctx->sock_fd, (struct sockaddr*)&client_addr, &client_addr_len);
-        if (client_fd == -1 && errno != EWOULDBLOCK) {
-            fprintf(stderr, "ERROR: failed to accept connection from socket - %s\n", strerror(errno));
-            close(client_fd);
+    while (ctx->loop_kind != SL_STOPPED) {
+        int client_fd = accept(ctx->sock_fd, (struct sockaddr*)&client_addr, &addr_sz);
 
-            return NULL;
-        } else if (client_fd > 0) {
+        // accept() call failed (how?)
+        // TODO: handle gracefully?
+        BX_PASSERT(client_fd != -1 || errno == EWOULDBLOCK);
+
+        if (client_fd > 0) {
+            inet_ntop(AF_INET, &client_addr.sin_addr, addr_buf, sizeof(addr_buf));
+            BX_LOG("INFO", "new client has connected {fd: %d, ip: %s:%d}\n", client_fd, addr_buf, ntohs(client_addr.sin_port));
+
             FD_SET(client_fd, &ctx->client_fdset);
 
             if (client_fd > max_fd) {
@@ -135,12 +156,14 @@ static void* _server_do_loop(void* arg)
         int ready = select(max_fd + 1, &read_fds, NULL, NULL, &timeout);
 
         if (ready == -1) {
-            fprintf(stderr, "ERROR: select() %s\n", strerror(errno));
+            BX_LOG("ERROR", "select() %s\n", strerror(errno));
+
+            continue;
         } else if (ready == 0) {
             continue;
         }
 
-        for (int fd = 3; fd <= max_fd && ready > 0 && ctx->should_be_running; ++fd) {
+        for (int fd = 3; fd <= max_fd && ready > 0 && ctx->loop_kind != SL_STOPPED; ++fd) {
             if (!FD_ISSET(fd, &read_fds)) {
                 continue;
             }
