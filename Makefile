@@ -13,10 +13,6 @@ DEPS        := $(OBJS:.o=.d)
 CFLAGS      := -Wall -Wpedantic -Werror -march=native -MMD -MP
 INC_DIRS    := -Isrc
 
-ifeq ($(THREADING),1)
-CFLAGS += -DTHREADING
-endif
-
 ifeq ($(DEBUG),1)
 CFLAGS += -DDEBUG -g$(DEBUGGER) -O0
 else
