@@ -1,14 +1,37 @@
-CC := clang
-SRCS :=\
-	src/main.c\
-	src/tcp_server.c\
+PROGRAM     := server
+CC          := clang
 
-CFLAGS := -Wall -Wpedantic -Werror -march=native -glldb
-INC_DIRS := -I./src
+SRCS        := \
+	src/main.c \
+	src/tcp_server.c
 
-ifdef THREADING
+BUILD_DIR   := build
+OBJS        := $(patsubst src/%.c, $(BUILD_DIR)/%.o, $(SRCS))
+DEPS        := $(OBJS:.o=.d)
+
+CFLAGS      := -Wall -Wpedantic -Werror -march=native -MMD -MP
+INC_DIRS    := -Isrc
+
+ifeq ($(THREADING),1)
 CFLAGS += -DTHREADING
 endif
 
-server: $(SRCS)
-	$(CC) $(CFLAGS) $(INC_DIRS) $^ -o $@
+$(PROGRAM): $(OBJS)
+	$(CC) $(CFLAGS) $(OBJS) -o $@
+
+$(BUILD_DIR)/%.o: src/%.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $(INC_DIRS) -c $< -o $@
+
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)
+
+-include $(DEPS)
+
+.PHONY: all
+all: $(PROGRAM)
+
+.PHONY: clean
+clean:
+	rm -rf $(BUILD_DIR)
+	rm $(PROGRAM)
+
