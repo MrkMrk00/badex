@@ -32,6 +32,7 @@ typedef enum
 struct server_context_t
 {
     int sock_fd;
+    int max_fd;
     ServerLoopKind loop_kind;
     fd_set client_fdset;
     OnReadyFunc on_ready;
@@ -172,8 +173,6 @@ static void* _server_do_loop(void* arg)
         .tv_usec = 10000, // 10 ms
     };
 
-    int max_fd = 0;
-
     BX_INFO("TCP server :: LOOP { threaded: %s, select_timeout: %ld ms }\n",
             ctx->loop_kind == SL_THREADED ? "true" : "false",
             (timeout.tv_usec / 1000) + timeout.tv_sec * 1000);
@@ -202,15 +201,15 @@ static void* _server_do_loop(void* arg)
               "TCP server :: CLIENT_NEW { fd: %d, ip: \"%s:%d\" }\n", client_fd, addr_buf, ntohs(client_addr.sin_port));
 #endif
             FD_SET(client_fd, &ctx->client_fdset);
-            if (client_fd > max_fd) {
-                max_fd = client_fd;
+            if (client_fd > ctx->max_fd) {
+                ctx->max_fd = client_fd;
             }
         }
 
         FD_COPY(&ctx->client_fdset, &read_fds);
         FD_COPY(&ctx->client_fdset, &write_fds);
         FD_COPY(&ctx->client_fdset, &error_fds);
-        int ready = select(max_fd + 1, &read_fds, &write_fds, &error_fds, &timeout);
+        int ready = select(ctx->max_fd + 1, &read_fds, &write_fds, &error_fds, &timeout);
 
         if (ready == -1) {
             switch (errno) {
@@ -226,7 +225,7 @@ static void* _server_do_loop(void* arg)
             continue;
         }
 
-        for (int fd = 3; fd <= max_fd && ready > 0 && ctx->loop_kind != SL_STOPPED; ++fd) {
+        for (int fd = 3; fd <= ctx->max_fd && ready > 0 && ctx->loop_kind != SL_STOPPED; ++fd) {
             if (FD_ISSET(fd, &error_fds)) {
                 int err = 0;
                 socklen_t err_sz = sizeof(err);
@@ -239,24 +238,29 @@ static void* _server_do_loop(void* arg)
                     server_disconnect_client(ctx, fd);
                 }
 
+                ready--;
+
                 continue;
             }
 
             ClientFlags flags = 0;
-            if (FD_ISSET(fd, &read_fds))
+            if (FD_ISSET(fd, &read_fds)) {
                 flags |= CF_WANTS_READ;
-            if (FD_ISSET(fd, &write_fds))
+            }
+            if (FD_ISSET(fd, &write_fds)) {
                 flags |= CF_WANTS_WRITE;
+            }
 
-            if (flags == 0)
+            if (flags == 0) {
                 continue;
+            }
 
             ctx->on_ready(ctx, fd, flags);
             ready--;
         }
     }
 
-    for (int fd = 3; fd <= max_fd; ++fd) {
+    for (int fd = 3; fd <= ctx->max_fd; ++fd) {
         if (!FD_ISSET(fd, &ctx->client_fdset)) {
             continue;
         }

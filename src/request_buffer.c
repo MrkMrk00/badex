@@ -50,12 +50,14 @@ size_t request_buffer_append(RequestBuffer* rb, const char* data, size_t data_si
     return TCP_BUF_MAX_SIZE - rb->size;
 }
 
-RequestRecvStatus request_buffer_recv(RequestBuffer* rb, int sock_fd)
+RequestRecvStatus request_buffer_recv(RequestBuffer* rb)
 {
+    BX_ASSERT(rb != NULL, "expected a non-null RequestBuffer pointer\n");
+
     while (rb->size < TCP_BUF_MAX_SIZE) {
         char buf[TCP_STACK_BUF_SIZE] = { 0 };
 
-        ssize_t bytes_read = recv(sock_fd, buf, sizeof(buf), 0);
+        ssize_t bytes_read = recv(rb->sock_fd, buf, sizeof(buf), 0);
         if (bytes_read == 0) {
             return RB_RECV_DISCONNECTED;
         }
@@ -75,30 +77,59 @@ RequestRecvStatus request_buffer_recv(RequestBuffer* rb, int sock_fd)
 
 void request_buffer_dispose(RequestBuffer* rb)
 {
-    free(rb->data);
+    BX_INFO("disposing of RequestBuffer (fd: %d)\n", rb->sock_fd);
+    BX_ASSERT(rb != NULL, "expected a non-null RequestBuffer pointer\n");
+
+    if (rb->data != NULL) {
+        free(rb->data);
+    }
 
     rb->data = NULL;
     rb->capacity = 0;
     rb->size = 0;
 }
 
-// #define REQUEST_BUFFER_SIZE UINT8_MAX
-// static RequestBuffer request_ringbuf[REQUEST_BUFFER_SIZE + 1] = { 0 };
-// static uint8_t ringbuf_start = 0;
+bool request_ring_buffer_put(RequestRingBuffer* ring_buffer, RequestBuffer* req)
+{
+    uint8_t best_index = req->sock_fd % REQUEST_RING_BUF_MAX_INDEX;
+    uint8_t cur_index = best_index;
 
-// static int find_request_buffer(int sock_fd)
-// {
-//     int best_bet = sock_fd % REQUEST_BUFFER_SIZE;
-//     if (request_ringbuf[best_bet].sock_fd == sock_fd) {
-//         return best_bet;
-//     }
-//
-//     // This will be kinda slow, but it should not happen that often?
-//     for (uint8_t i = ringbuf_start; i != ringbuf_start - 1; ++i) {
-//         if (request_ringbuf[i].sock_fd == sock_fd) {
-//             return i;
-//         }
-//     }
-//
-//     return -1;
-// }
+    RequestBuffer* current;
+    do {
+        current = ring_buffer->entries[cur_index];
+        if (current == NULL || current->sock_fd == req->sock_fd) {
+            ring_buffer->entries[cur_index] = req;
+
+            return true;
+        }
+
+        cur_index++;
+    } while (cur_index != best_index);
+
+    return false;
+}
+
+RequestBuffer* request_ring_buffer_pop(RequestRingBuffer* ring_buffer, int sock_fd)
+{
+    uint8_t best_index = sock_fd % REQUEST_RING_BUF_MAX_INDEX;
+    uint8_t cur_index = best_index;
+
+    RequestBuffer* current;
+    do {
+        current = ring_buffer->entries[cur_index];
+        if (current == NULL) {
+            return NULL;
+        }
+
+        // found the request buffer
+        if (current->sock_fd == sock_fd) {
+            ring_buffer->entries[cur_index] = NULL;
+
+            return current;
+        }
+
+        cur_index++;
+    } while (cur_index != best_index);
+
+    return NULL;
+}

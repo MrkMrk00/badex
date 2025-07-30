@@ -41,24 +41,36 @@ void server_close(ServerContext*);
 
 typedef struct
 {
+    int sock_fd;
     char* data;
     size_t size, capacity;
 } RequestBuffer;
 
-typedef ssize_t RequestRecvStatus;
+#define REQUEST_RING_BUF_MAX_INDEX UINT8_MAX
 
-#define RB_RECV_OOM ((RequestRecvStatus)-1)
+// Maybe allocate me on the heap? or static?
+// There will most likely have to be a mutex here, if the server becomes multi-threaded. :/
+typedef struct
+{
+    RequestBuffer* entries[REQUEST_RING_BUF_MAX_INDEX + 1];
+} RequestRingBuffer;
+
+typedef ssize_t RequestRecvStatus;
+#define RB_RECV_OOM ((RequestRecvStatus) - 1)
 #define RB_RECV_DISCONNECTED ((RequestRecvStatus)0)
 
 // Read from socket and copy the data into the request buffer.
 // Returns the number of bytes that have been read.
-RequestRecvStatus request_buffer_recv(RequestBuffer* rb, int sock_fd);
+RequestRecvStatus request_buffer_recv(RequestBuffer*);
 
 // Returns the number of bytes, that can be copied into the buffer.
 // Returns 0 on failure - buffer is full, 0 bytes can be written.
 size_t request_buffer_append(RequestBuffer* rb, const char* data, size_t data_size);
 
 // Destructor.
-void request_buffer_dispose(RequestBuffer* rb);
+void request_buffer_dispose(RequestBuffer*);
+
+bool request_ring_buffer_put(RequestRingBuffer*, RequestBuffer*);
+RequestBuffer* request_ring_buffer_pop(RequestRingBuffer*, int sock_fd);
 
 #endif // !TCP_SERVER_H_
