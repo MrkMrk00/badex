@@ -1,4 +1,5 @@
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -7,47 +8,58 @@
 #include "log.h"
 #include "tcp_server.h"
 
-#define TCP_RECV_BUF_SIZE 2048
 static const uint32_t INADDR_LOCALHOST = (127 << 24) + 1;
 static const unsigned char EOT = 0x4;
 
-static void on_ready(ServerContext* ctx, int sock_fd)
+static void on_ready(ServerContext* ctx, int sock_fd, ClientFlags flags)
 {
-    char buf[TCP_RECV_BUF_SIZE] = { 0 };
-    const size_t max_bytes = sizeof(buf) - 1;
-
-    ssize_t bytes_read = recv(sock_fd, buf, max_bytes, 0);
-    if (bytes_read == 0 || (bytes_read == 1 && buf[bytes_read - 1] == EOT)) {
-        server_disconnect_client(ctx, sock_fd);
-
+    if (~flags & CF_WANTS_READ) {
         return;
     }
 
-    BX_PASSERT(bytes_read > 0);
-    if (bytes_read == max_bytes) {
-        BX_NOTICE("message from \"%d\" too long", sock_fd);
+    RequestBuffer rb = { 0 };
+    RequestRecvStatus status = request_buffer_recv(&rb, sock_fd);
+    switch (status) {
+        case RB_RECV_OOM:
+            BX_INFO("REQUEST TOO LARGE disconnecting client: %d\n", sock_fd);
+            // fallthrough
+
+        case RB_RECV_DISCONNECTED:
+            server_disconnect_client(ctx, sock_fd);
+            request_buffer_dispose(&rb);
+            return;
     }
 
-    buf[bytes_read] = 0;
+    if (rb.size == 1 && *rb.data == EOT) {
+        server_disconnect_client(ctx, sock_fd);
+    } else {
+        // null terminate -> be able to use as string
+        request_buffer_append(&rb, "\0", 1);
 
-    if (strcmp(buf, "/close\r\n") == 0) {
-        server_close(ctx);
+        if (strcmp(rb.data, "/close\r\n") == 0) {
+            server_close(ctx);
+        }
+
+        printf("=== %d says \"%s\" ===\n", sock_fd, rb.data);
     }
 
-    printf("=== %d says \"%s\" ===\n", sock_fd, buf);
+    // TODO: this should be reused :)
+    request_buffer_dispose(&rb);
 }
 
 void print_usage(FILE* file, const char* program_name)
 {
     fprintf(file, "Usage: %s\n", program_name);
     fprintf(file, "Flags:\n");
-    fprintf(file, "\t --threaded\tspawns the server on a separate thread (useless for now)\n");
+    fprintf(file, "\t --threaded         spawns the server on a separate thread (useless for now)\n");
+    fprintf(file, "\t --port=<number>    port on which the server will listen (default = 1234)\n");
 }
 
 typedef struct
 {
     bool threaded;
     const char* program_name;
+    uint16_t port;
 } CmdArgs;
 
 #define ARGS_SHIFT(argc, argv) (argc--, *argv++)
@@ -55,6 +67,7 @@ typedef struct
 int main(int argc, char* argv[])
 {
     CmdArgs args = { 0 };
+    args.port = 1234;
     args.program_name = ARGS_SHIFT(argc, argv);
 
     while (argc > 0) {
@@ -74,14 +87,30 @@ int main(int argc, char* argv[])
             return 0;
         }
 
-        print_usage(stderr, args.program_name);
+        if (strstr(arg, "--port=") == arg) {
+            int offset = strlen("--port=");
+            char* endptr;
+            long port = strtol(arg + offset, &endptr, 10);
+
+            if (*(arg + offset) == '\0' || *endptr != '\0' || port <= 0 || port > UINT16_MAX) {
+                fprintf(stderr, "invalid value for argument port \"%s\"\n", arg + offset);
+                print_usage(stderr, args.program_name);
+
+                return 1;
+            }
+
+            args.port = port;
+            continue;
+        }
+
         fprintf(stderr, "unknown command line argument \"%s\"\n", arg);
+        print_usage(stderr, args.program_name);
 
         exit(1);
     }
 
     ServerContext* ctx = NULL;
-    int err = server_context_create(&ctx, INADDR_LOCALHOST, 1234);
+    int err = server_context_create(&ctx, INADDR_LOCALHOST, args.port);
     if (err < 0) {
         BX_FATAL("failed to create server context - %s\n", strerror(-err));
     }

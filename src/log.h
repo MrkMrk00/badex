@@ -1,6 +1,8 @@
 #ifndef SUPPORT_H_
 #define SUPPORT_H_
 
+#include <stdio.h>
+
 // main logging statement
 #define _BX_DO_LOG(file, level, message, ...) fprintf((file), "%s:%d: [%s] " message, __FILE__, __LINE__, (level), __VA_ARGS__)
 
@@ -22,8 +24,8 @@
         exit(1);                                                                                                                                               \
     } while (0)
 
-// static assert is always available
-#define BX_STATIC_ASSERT(cond, message)                                                                                                                        \
+// runtime assert is always available
+#define BX_RTASSERT(cond, message)                                                                                                                             \
     if (!(cond))                                                                                                                                               \
     BX_FATAL("(%s): %s\n", #cond, (message))
 

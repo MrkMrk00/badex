@@ -2,9 +2,10 @@ PROGRAM     := server
 CC          := clang
 DEBUGGER    := lldb
 
-SRCS        := \
-	src/main.c \
-	src/tcp_server.c
+SRCS        :=\
+	src/main.c\
+	src/tcp_server.c\
+	src/request_buffer.c\
 
 BUILD_DIR   := build
 OBJS        := $(patsubst src/%.c, $(BUILD_DIR)/%.o, $(SRCS))
