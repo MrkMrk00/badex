@@ -1,0 +1,30 @@
+name: tidy
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  tidy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install tools
+        run: |
+          apt-get install -y clang bear make
+
+      - name: create compile_commands.json
+        run: |
+          bear -- make -Bj
+
+      - uses: cpp-linter/cpp-linter-action@main
+        id: linter
+        continue-on-error: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          style: file
+          files-changed-only: false
+          thread-comments: false
+
