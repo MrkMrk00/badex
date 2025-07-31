@@ -14,7 +14,7 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
-#include "log.h"
+#include "support/log.h"
 #include "tcp_server.h"
 
 #define CLIENT_QUEUE_MAX_SIZE 20
@@ -170,7 +170,7 @@ static void* _server_do_loop(void* arg)
     // TODO: probably not the best way to do this?
     struct timeval timeout = {
         .tv_sec = 0,
-        .tv_usec = 10000, // 10 ms
+        .tv_usec = 1000,
     };
 
     BX_INFO("TCP server :: LOOP { threaded: %s, select_timeout: %ld ms }\n",

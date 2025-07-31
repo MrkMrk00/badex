@@ -1,10 +1,11 @@
+#include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 
-#include "log.h"
+#include "support/log.h"
 #include "tcp_server.h"
 
 // 128 MiB maximum requst size
@@ -58,6 +59,14 @@ RequestRecvStatus request_buffer_recv(RequestBuffer* rb)
         char buf[TCP_STACK_BUF_SIZE] = { 0 };
 
         ssize_t bytes_read = recv(rb->sock_fd, buf, sizeof(buf), 0);
+        if (bytes_read == -1) {
+            if (errno == EAGAIN) {
+                break;
+            } else {
+                BX_PFATAL(NULL);
+            }
+        }
+
         if (bytes_read == 0) {
             return RB_RECV_DISCONNECTED;
         }
