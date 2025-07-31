@@ -20,7 +20,7 @@ typedef enum
     CF_WANTS_READ = 1 << 1,
 } ClientFlags;
 
-typedef void (*OnReadyFunc)(ServerContext* ctx, int sock_fd, ClientFlags flags);
+typedef void (*OnReadyFunc)(ServerContext* ctx, int sock_fd, uint32_t flags);
 
 // Creates the server context.
 // - creates, binds and starts listening on the socket defined by `address` and `port`

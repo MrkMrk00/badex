@@ -25,7 +25,7 @@ static const unsigned char EOT = 0x4;
 
 static RequestRingBuffer request_ring_buffer = { 0 };
 
-static void on_ready(ServerContext* ctx, int sock_fd, ClientFlags flags)
+static void on_ready(ServerContext* ctx, int sock_fd, uint32_t flags)
 {
     RequestBuffer* rb = request_ring_buffer_pop(&request_ring_buffer, sock_fd);
 
