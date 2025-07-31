@@ -113,7 +113,7 @@ int main(int argc, char* argv[])
 
 static RequestBuffer* request_buffer_create(int sock_fd)
 {
-    RequestBuffer* rb;
+    RequestBuffer* rb = NULL;
     BX_ASSERT((rb = malloc(sizeof(RequestBuffer))) != NULL, "out of memory");
 
     memset(rb, 0, sizeof(RequestBuffer));
