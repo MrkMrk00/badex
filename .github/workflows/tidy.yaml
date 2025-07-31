@@ -20,9 +20,9 @@ jobs:
 
       - name: lint
         run: |
-          find src -type f | xargs clang-tidy
+          find src -type f | xargs clang-tidy --warnings-as-errors=*
 
       - name: check formatting
         run: |
-          find src -type f | xargs clang-format --Werror --dry-run
+          find src -type f | xargs clang-format -Werror --dry-run
 
