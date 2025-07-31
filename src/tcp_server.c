@@ -93,7 +93,7 @@ int server_context_create(ServerContext** ctx_out, uint32_t address, uint16_t po
 #endif
 
     (*ctx_out) = malloc(sizeof(ServerContext));
-    BX_ASSERT((*ctx_out) != NULL, "out of memory");
+    BX_RTASSERT((*ctx_out) != NULL, "out of memory");
 
     memset((*ctx_out), 0, sizeof(ServerContext));
     (*ctx_out)->sock_fd = sock_fd;
