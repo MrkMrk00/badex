@@ -1,6 +1,4 @@
 #include <errno.h>
-#include <stdbool.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -9,15 +7,17 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <netinet/in.h>
-#include <pthread.h>
 #include <sys/select.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 
 #include "support/log.h"
 #include "tcp_server.h"
 
 #define CLIENT_QUEUE_MAX_SIZE 20
+
+#ifndef FD_COPY
+#define FD_COPY(src, dest) memcpy(dest, src, sizeof(fd_set))
+#endif
 
 // Main loop
 static void* _server_do_loop(void* arg);

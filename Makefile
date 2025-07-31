@@ -11,7 +11,7 @@ BUILD_DIR   := build
 OBJS        := $(patsubst src/%.c, $(BUILD_DIR)/%.o, $(SRCS))
 DEPS        := $(OBJS:.o=.d)
 
-CFLAGS      := -Wall -Wpedantic -Werror -march=native -MMD -MP
+CFLAGS      := -Wall -Wpedantic -Werror -march=native -MMD -MP -std=c99
 INC_DIRS    := -Isrc
 
 ifeq ($(DEBUG),1)

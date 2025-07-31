@@ -2,6 +2,7 @@
 #define TCP_SERVER_H_
 
 #include <pthread.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <sys/types.h>
 
