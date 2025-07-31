@@ -12,19 +12,17 @@ jobs:
 
       - name: install tools
         run: |
-          apt-get install -y clang bear make
+          sudo apt-get install -y clang clang-tidy clang-format bear make
 
       - name: create compile_commands.json
         run: |
           bear -- make -Bj
 
-      - uses: cpp-linter/cpp-linter-action@main
-        id: linter
-        continue-on-error: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          style: file
-          files-changed-only: false
-          thread-comments: false
+      - name: lint
+        run: |
+          find src -type f | xargs clang-tidy
+
+      - name: check formatting
+        run: |
+          find src -type f | xargs clang-format --Werror --dry-run
 
