@@ -1,7 +1,6 @@
 #ifndef TCP_SERVER_H_
 #define TCP_SERVER_H_
 
-#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <sys/types.h>
@@ -10,31 +9,58 @@
 // Server context and lifecycle functions
 // =========================================================
 
-// opaque context type ;)
-struct server_context_t;
-typedef struct server_context_t ServerContext;
-
-typedef enum
+enum
 {
     CF_WANTS_WRITE = 1 << 0,
     CF_WANTS_READ = 1 << 1,
-} ClientFlags;
+};
 
-typedef void (*OnReadyFunc)(ServerContext* ctx, int sock_fd, uint32_t flags);
+typedef uint32_t ClientFlags;
+struct server_context_t;
+
+// Signature of the function, that gets called when a client is ready to
+// receive or send data to the server.
+typedef void (*OnReadyFunc)(struct server_context_t* ctx, int sock_fd, ClientFlags flags);
+
+typedef struct server_context_t
+{
+    int sock_fd;
+    int max_fd;
+    bool running;
+    fd_set client_fdset;
+    OnReadyFunc on_ready;
+} ServerContext;
 
 // Creates the server context.
 // - creates, binds and starts listening on the socket defined by `address` and `port`
 //
 // Returns: 0 on success; -errno on failure
 // If the reason for failing is out of the user's control, exits the program.
-int server_context_create(ServerContext** ctx_out, uint32_t address, uint16_t port);
-void server_context_dispose(ServerContext**);
+int server_context_create(ServerContext* ctx_out, uint32_t address, uint16_t port);
 
-void server_run_sync(ServerContext*, OnReadyFunc on_ready);
-pthread_t server_run_detached(ServerContext*, OnReadyFunc on_ready);
+void server_run(ServerContext*, OnReadyFunc on_ready);
 
 void server_disconnect_client(ServerContext*, int client_sock_fd);
 void server_close(ServerContext*);
+
+// =========================================================
+// Multi-threaded IO handling
+// =========================================================
+
+typedef struct
+{
+    int sock_fd;
+    ClientFlags flags;
+} RequestQueueTask;
+
+struct request_queue_t;
+typedef struct request_queue_t RequestQueue;
+
+RequestQueue* request_queue_create(void);
+void request_queue_dispose(RequestQueue**);
+
+void request_queue_enqueue(RequestQueue*, int client_sock_fd, ClientFlags flags);
+RequestQueueTask request_queue_pop(RequestQueue*);
 
 // =========================================================
 // Request buffering

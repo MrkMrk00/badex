@@ -6,6 +6,7 @@ SRCS        :=\
 	src/main.c\
 	src/tcp_server.c\
 	src/request_buffer.c\
+	src/request_queue.c\
 
 BUILD_DIR   := build
 OBJS        := $(patsubst src/%.c, $(BUILD_DIR)/%.o, $(SRCS))

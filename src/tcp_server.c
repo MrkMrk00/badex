@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,32 +17,13 @@
 #define CLIENT_QUEUE_MAX_SIZE 20
 
 #ifndef FD_COPY
-#define FD_COPY(src, dest) memcpy(dest, src, sizeof(fd_set))
+#define FD_COPY(src, dest) memcpy((dest), (src), sizeof(fd_set))
 #endif
 
 // Main loop
 static void* _server_do_loop(void* arg);
 
-typedef enum
-{
-    SL_STOPPED = 0,
-    SL_SYNC,
-    SL_THREADED,
-} ServerLoopKind;
-
-struct server_context_t
-{
-    int sock_fd;
-    int max_fd;
-    ServerLoopKind loop_kind;
-    fd_set client_fdset;
-    OnReadyFunc on_ready;
-
-    // only used when `look_kind` == `SL_THREADED`
-    pthread_t thread;
-};
-
-int server_context_create(ServerContext** ctx_out, uint32_t address, uint16_t port)
+int server_context_create(ServerContext* ctx_out, uint32_t address, uint16_t port)
 {
     BX_ASSERT(ctx_out != NULL, "expected a non-NULL ctx_out parameter");
 
@@ -92,44 +74,18 @@ int server_context_create(ServerContext** ctx_out, uint32_t address, uint16_t po
             CLIENT_QUEUE_MAX_SIZE);
 #endif
 
-    (*ctx_out) = malloc(sizeof(ServerContext));
-    BX_RTASSERT((*ctx_out) != NULL, "out of memory");
-
-    memset((*ctx_out), 0, sizeof(ServerContext));
-    (*ctx_out)->sock_fd = sock_fd;
-    (*ctx_out)->loop_kind = SL_STOPPED;
+    ctx_out->sock_fd = sock_fd;
 
     return 0;
 }
 
-void server_context_dispose(ServerContext** ctx)
+void server_run(ServerContext* ctx, OnReadyFunc on_ready)
 {
-    BX_ASSERT(ctx != NULL, "expected a non-NULL ServerContext pointer");
-
-    if ((*ctx) != NULL) {
-        free(*ctx);
-        (*ctx) = NULL;
-    }
-}
-
-void server_run_sync(ServerContext* ctx, OnReadyFunc on_ready)
-{
-    BX_ASSERT(ctx->loop_kind == SL_STOPPED, "the server was already started");
+    BX_ASSERT(!ctx->running, "the server was already started");
     ctx->on_ready = on_ready;
-    ctx->loop_kind = SL_SYNC;
+    ctx->running = true;
 
     _server_do_loop((void*)ctx);
-}
-
-pthread_t server_run_detached(ServerContext* ctx, OnReadyFunc on_ready)
-{
-    BX_ASSERT(ctx->loop_kind == SL_STOPPED, "the server was already started");
-    ctx->on_ready = on_ready;
-    ctx->loop_kind = SL_THREADED;
-
-    pthread_create(&ctx->thread, NULL, _server_do_loop, (void*)ctx);
-
-    return ctx->thread;
 }
 
 void server_disconnect_client(ServerContext* ctx, int client_sock_fd)
@@ -144,7 +100,7 @@ void server_disconnect_client(ServerContext* ctx, int client_sock_fd)
 
 void server_close(ServerContext* ctx)
 {
-    ctx->loop_kind = SL_STOPPED;
+    ctx->running = false;
 
     if (ctx->sock_fd > 0) {
         close(ctx->sock_fd);
@@ -152,16 +108,43 @@ void server_close(ServerContext* ctx)
     ctx->sock_fd = -1;
 }
 
+static int accept_client(int server_sock_fd)
+{
+    struct sockaddr_in client_addr;
+    socklen_t addr_sz = sizeof(client_addr);
+
+    int client_fd = accept(server_sock_fd, (struct sockaddr*)&client_addr, &addr_sz);
+    if (client_fd < 0) {
+        switch (errno) {
+            // no new clients waiting to be connected or handling of the syscall was interrupted?
+            // continue with calling select()
+            case EWOULDBLOCK:
+            case EINTR:
+                return -1;
+            default:
+                BX_PFATAL(NULL);
+        }
+    }
+
+    // set the socket to not block
+    BX_PASSERT(fcntl(client_fd, F_SETFL, fcntl(client_fd, F_GETFL, 0) | O_NONBLOCK) != -1);
+
+#ifdef DEBUG
+
+    char addr_buf[INET_ADDRSTRLEN] = { 0 };
+    inet_ntop(AF_INET, &client_addr.sin_addr, addr_buf, sizeof(addr_buf));
+    BX_INFO("TCP server :: CLIENT_NEW { fd: %d, ip: \"%s:%d\" }\n", client_fd, addr_buf, ntohs(client_addr.sin_port));
+#endif
+
+    return client_fd;
+}
+
 static void* _server_do_loop(void* arg)
 {
     ServerContext* ctx = (ServerContext*)arg;
 
-    struct sockaddr_in client_addr;
-    socklen_t addr_sz = sizeof(client_addr);
-
-    FD_ZERO(&ctx->client_fdset);
-
     fd_set read_fds, write_fds, error_fds;
+    FD_ZERO(&ctx->client_fdset);
     FD_ZERO(&read_fds);
     FD_ZERO(&write_fds);
     FD_ZERO(&error_fds);
@@ -173,34 +156,13 @@ static void* _server_do_loop(void* arg)
         .tv_usec = 1000,
     };
 
-    BX_INFO("TCP server :: LOOP { threaded: %s, select_timeout: %ld ms }\n",
-            ctx->loop_kind == SL_THREADED ? "true" : "false",
-            (timeout.tv_usec / 1000) + timeout.tv_sec * 1000);
+    BX_INFO("TCP server :: LOOP { select_timeout: %ld ms }\n", (timeout.tv_usec / 1000) + timeout.tv_sec * 1000);
 
-    while (ctx->loop_kind != SL_STOPPED) {
-        int client_fd = accept(ctx->sock_fd, (struct sockaddr*)&client_addr, &addr_sz);
-        if (client_fd == -1) {
-            switch (errno) {
-                // no new clients waiting to be connected
-                // continue with calling select()
-                case EWOULDBLOCK:
-                    break;
-                // terminated by a signal - try again?
-                case EINTR:
-                    continue;
-                default:
-                    BX_PFATAL(NULL);
-            }
-        }
-
-        if (client_fd > 0) {
-#ifdef DEBUG
-            char addr_buf[INET_ADDRSTRLEN] = { 0 };
-            inet_ntop(AF_INET, &client_addr.sin_addr, addr_buf, sizeof(addr_buf));
-            BX_INFO(
-              "TCP server :: CLIENT_NEW { fd: %d, ip: \"%s:%d\" }\n", client_fd, addr_buf, ntohs(client_addr.sin_port));
-#endif
+    while (ctx->running) {
+        int client_fd = accept_client(ctx->sock_fd);
+        if (client_fd != -1) {
             FD_SET(client_fd, &ctx->client_fdset);
+
             if (client_fd > ctx->max_fd) {
                 ctx->max_fd = client_fd;
             }
@@ -209,8 +171,8 @@ static void* _server_do_loop(void* arg)
         FD_COPY(&ctx->client_fdset, &read_fds);
         FD_COPY(&ctx->client_fdset, &write_fds);
         FD_COPY(&ctx->client_fdset, &error_fds);
-        int ready = select(ctx->max_fd + 1, &read_fds, &write_fds, &error_fds, &timeout);
 
+        int ready = select(ctx->max_fd + 1, &read_fds, &write_fds, &error_fds, &timeout);
         if (ready == -1) {
             switch (errno) {
                 // the timeout was interrupted, continue as if nothing happened
@@ -219,13 +181,11 @@ static void* _server_do_loop(void* arg)
                 default:
                     BX_PFATAL(NULL);
             }
-        }
-
-        if (ready == 0) {
+        } else if (ready == 0) {
             continue;
         }
 
-        for (int fd = 3; fd <= ctx->max_fd && ready > 0 && ctx->loop_kind != SL_STOPPED; ++fd) {
+        for (int fd = 3; fd <= ctx->max_fd && ready > 0 && ctx->running; ++fd) {
             if (FD_ISSET(fd, &error_fds)) {
                 int err = 0;
                 socklen_t err_sz = sizeof(err);

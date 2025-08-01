@@ -10,9 +10,9 @@
 
 typedef struct
 {
-    bool threaded;
     const char* program_name;
     uint16_t port;
+    uint8_t io_thread_count;
 } CmdArgs;
 
 // === forward declarations
@@ -91,22 +91,13 @@ cleanup:
 int main(int argc, char* argv[])
 {
     CmdArgs args = parse_args(argc, argv);
-    ServerContext* ctx = NULL;
+    ServerContext ctx = { 0 };
     int err = server_context_create(&ctx, INADDR_LOCALHOST, args.port);
     if (err < 0) {
         BX_FATAL("failed to create server context - %s\n", strerror(-err));
     }
 
-    if (args.threaded) {
-        pthread_t thread = server_run_detached(ctx, on_ready);
-
-        void* ret = NULL;
-        pthread_join(thread, ret);
-    } else {
-        server_run_sync(ctx, on_ready);
-    }
-
-    server_context_dispose(&ctx);
+    server_run(&ctx, on_ready);
 
     return 0;
 }
@@ -126,17 +117,28 @@ static CmdArgs parse_args(int argc, char* argv[])
 {
 #define ARGS_SHIFT(argc, argv) (argc--, *argv++)
 
-    CmdArgs args = { 0 };
-    args.port = 1234;
-    args.program_name = ARGS_SHIFT(argc, argv);
+    CmdArgs args = {
+        .port = 1234,
+        .program_name = ARGS_SHIFT(argc, argv),
+        .io_thread_count = 1,
+    };
 
     while (argc > 0) {
         const char* arg = ARGS_SHIFT(argc, argv);
 
-        // TODO: implement thread pool for handling TCP requests
-        // then change this to --threads=<number> or something
-        if (strcmp(arg, "--threaded") == 0) {
-            args.threaded = true;
+        if (strcmp(arg, "--io-threads=") == 0) {
+            int offset = strlen("--io-threads=");
+            char* endptr;
+            long io_thread_count = strtol(arg + offset, &endptr, 10);
+
+            if (*(arg + offset) == '\0' || *endptr != '\0' || io_thread_count <= 1 || io_thread_count > UINT8_MAX) {
+                fprintf(stderr, "invalid value for argument --io-threads \"%s\"\n", arg + offset);
+                print_usage(stderr, args.program_name);
+
+                exit(1);
+            }
+
+            args.io_thread_count = io_thread_count;
 
             continue;
         }
@@ -176,6 +178,6 @@ static void print_usage(FILE* file, const char* program_name)
 {
     fprintf(file, "Usage: %s\n", program_name);
     fprintf(file, "Flags:\n");
-    fprintf(file, "\t --threaded         spawns the server on a separate thread (useless for now)\n");
-    fprintf(file, "\t --port=<number>    port on which the server will listen (default = 1234)\n");
+    fprintf(file, "\t --io-thread-count=<number>    how many threads to spawn for handling IO (default = 1)\n");
+    fprintf(file, "\t --port=<number>               port on which the server will listen (default = 1234)\n");
 }
