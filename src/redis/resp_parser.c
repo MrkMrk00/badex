@@ -22,15 +22,16 @@ typedef struct
 
 static inline char advance(RespParser* p);
 static inline char peek(RespParser* p);
-static inline char peek_n(RespParser* p, size_t n);
 static inline bool match(RespParser* p, char ch);
 static inline bool match_rn(RespParser* p);
+static inline bool ensure_source_len(RespParser* p, size_t token_len);
 
 static long read_long(RespParser* p);
-static void read_string(RespParser* p, StringBuilder* sb);
+static void read_string(RespParser* p, StringBuilder* sb, size_t expected_len);
 
 /**
  * Makes quite a lot of allocations :/ (for now, will fix later)
+ * And is ugly, but good for now.
  */
 ssize_t resp_try_parse(RespCommand* cmd, StringBuilder* sb, const char* source, size_t source_len)
 {
@@ -39,41 +40,39 @@ ssize_t resp_try_parse(RespCommand* cmd, StringBuilder* sb, const char* source, 
     p.source_len = source_len;
     sb->size = 0;
 
-    // invalid command (it should start as array)
-    if (!match(&p, RESP_ARRAY)) {
-        return 0;
-    }
-
-    // Is valid number? also: command cannot be a null array (*-1\r\r)
+    char type = advance(&p);
     long cmd_len = read_long(&p);
-    if (cmd_len > UINT8_MAX || cmd_len < 1) {
-        return 0;
-    }
 
+    // incomplete command
     if (!match_rn(&p)) {
         return 0;
     }
-
-    // parse command
-    //    1) Has to be a string
-    if (!match(&p, RESP_BULK_STRING)) {
-        return 0;
+    // invalid command
+    if (type != RESP_ARRAY || cmd_len <= 0 || cmd_len > UINT8_MAX) {
+        return -1;
     }
 
+    // === Command name
+
+    char cmd_type = advance(&p);
     long expected_str_len = read_long(&p);
-    if (expected_str_len <= 0) {
-        BX_INFO("invalid bulk string length (%ld)\n", expected_str_len);
-
+    if (!match_rn(&p)) {
         return 0;
     }
-    if (!match_rn(&p)) {
+
+    // invalid (shortest command = 3)
+    if (cmd_type != RESP_BULK_STRING || expected_str_len < 3) {
+        return -1;
+    }
+
+    // incomplete packet
+    if (!ensure_source_len(&p, expected_str_len)) {
         return 0;
     }
 
     // Read command name
     sb->size = 0;
-    sb_ensure_capacity(sb, expected_str_len);
-    read_string(&p, sb);
+    read_string(&p, sb, expected_str_len);
 
     if (!match_rn(&p)) {
         return 0;
@@ -94,7 +93,7 @@ ssize_t resp_try_parse(RespCommand* cmd, StringBuilder* sb, const char* source, 
     size_t last_size = 0;
     for (int i = 0; i < cmd->args_count; ++i) {
         if (!match(&p, RESP_BULK_STRING)) {
-            BX_RTASSERT(1 == 0, "non-string arguments not implemented\n");
+            return 0;
         }
 
         expected_str_len = read_long(&p);
@@ -107,7 +106,7 @@ ssize_t resp_try_parse(RespCommand* cmd, StringBuilder* sb, const char* source, 
         }
 
         sb_ensure_capacity(sb, expected_str_len);
-        read_string(&p, sb);
+        read_string(&p, sb, expected_str_len);
         if ((sb->size - last_size) != expected_str_len || !match_rn(&p)) {
             return 0;
         }
@@ -116,13 +115,15 @@ ssize_t resp_try_parse(RespCommand* cmd, StringBuilder* sb, const char* source, 
         last_size = sb->size;
     }
 
-    BX_RTASSERT((cmd->args = malloc(sb->size)) != NULL, "out of memory\n");
-    memcpy(cmd->args, sb->memory, sb->size);
+    if (cmd->args_count > 0) {
+        BX_RTASSERT((cmd->args = malloc(sb->size)) != NULL, "out of memory\n");
+        memcpy(cmd->args, sb->memory, sb->size);
+    }
 
-    return p.offset;
+    return p.offset + 1;
 }
 
-#define IS_DIGIT(char) (strchr("1234567890", (char)) != NULL)
+#define IS_DIGIT(ch) (strchr("1234567890", (ch)) != NULL)
 
 // returns LONG_MIN on failure
 static long read_long(RespParser* p)
@@ -147,20 +148,30 @@ static long read_long(RespParser* p)
     return cmd_len;
 }
 
-static void read_string(RespParser* p, StringBuilder* sb)
+#define COMPARE_3(parser, keyword)                                                                                     \
+    ((parser)->source[p->offset] == (keyword)[0] && (parser)->source[p->offset + 1] == (keyword)[1] &&                 \
+     (parser)->source[p->offset + 2] == (keyword)[2])
+
+static void read_string(RespParser* p, StringBuilder* sb, size_t expeceted_len)
 {
-    if (peek_n(p, 1) == GET[0] && peek_n(p, 2) == GET[1] && peek_n(p, 3) == GET[2]) {
-        p->offset += 3;
-        sb_append_slice(sb, GET, 3);
-
-        return;
-    } else if (peek_n(p, 1) == SET[0] && peek_n(p, 2) == SET[1] && peek_n(p, 3) == SET[2]) {
-        p->offset += 3;
-        sb_append_slice(sb, SET, 3);
-
+    if (!ensure_source_len(p, expeceted_len)) {
         return;
     }
 
+    switch (expeceted_len) {
+        case 3: {
+            if (COMPARE_3(p, GET))
+                sb_append_slice(sb, GET, 3);
+            else if (COMPARE_3(p, SET))
+                sb_append_slice(sb, SET, 3);
+            else
+                break;
+
+            p->offset += 3;
+        } break;
+    }
+
+    sb_ensure_capacity(sb, expeceted_len);
     while (peek(p) != '\r' && peek(p) != EOF) {
         sb_putchar(sb, advance(p));
     }
@@ -173,15 +184,6 @@ static inline char advance(RespParser* p)
     }
 
     return p->source[p->offset++];
-}
-
-static inline char peek_n(RespParser* p, size_t n)
-{
-    if ((p->offset + n - 1) >= p->source_len) {
-        return EOF;
-    }
-
-    return p->source[p->offset + n - 1];
 }
 
 static inline char peek(RespParser* p)
@@ -207,4 +209,11 @@ static inline bool match(RespParser* p, char ch)
 static inline bool match_rn(RespParser* p)
 {
     return match(p, '\r') && match(p, '\n');
+}
+
+static inline bool ensure_source_len(RespParser* p, size_t token_len)
+{
+    // The starting char of the parsed token, is the current char -> thus - 1
+
+    return p->source_len > (p->offset + token_len - 1);
 }

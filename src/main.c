@@ -25,6 +25,7 @@ static const uint32_t INADDR_LOCALHOST = (127 << 24) + 1;
 static const unsigned char EOT = 0x4;
 
 static RequestRingBuffer request_ring_buffer = { 0 };
+static StringBuilder string_builder = { 0 };
 
 static void on_ready(ServerContext* ctx, int sock_fd, uint32_t flags)
 {
@@ -47,23 +48,33 @@ static void on_ready(ServerContext* ctx, int sock_fd, uint32_t flags)
                 goto cleanup;
         }
 
-        if (rb->size == 1 && *rb->data == EOT) {
+        if (rb->size > 0 && rb->data[rb->size - 1] == EOT) {
             server_disconnect_client(ctx, sock_fd);
             goto cleanup;
         }
 
         // === everything was sucessfull -> we have a valid RequestBuffer
 
-        for (int i = 0; i < rb->size; ++i) {
+        RespCommand cmd = { 0 };
+        ssize_t new_offset = resp_try_parse(&cmd, &string_builder, rb->data, rb->size);
+        if (new_offset > 0) {
+            printf("%s", cmd.name);
+            for (int i = 0; i < cmd.args_count; ++i) {
+                int str_len = strlen(cmd.args);
+                printf(" %s ", cmd.args);
+                cmd.args += str_len + 1;
+            }
+            printf("\n");
+
+            // didn't test, if it's correct :)
+            size_t size_to_copy = rb->size - new_offset;
+            if (size_to_copy > 0) {
+                memcpy(rb->data, rb->data + new_offset, size_to_copy);
+                rb->size = size_to_copy;
+            } else {
+                rb->size = 0;
+            }
         }
-
-        // null terminate -> be able to use as string
-        request_buffer_append(rb, "\0", 1);
-
-        printf("=== %d says \"%s\" ===\n", sock_fd, rb->data);
-
-        // reuse the allocated request buffer for subsequent requests
-        rb->size = 0;
 
         // if there is no more space in the ring_buffer, we can just destroy it
         if (request_ring_buffer_put(&request_ring_buffer, rb)) {
@@ -88,26 +99,6 @@ cleanup:
 
 int main(int argc, char* argv[])
 {
-    const char* cmd = "*3\r\n"
-                      "$3\r\nSET\r\n"
-                      "$3\r\nfoo\r\n"
-                      "$3\r\nbar\r\n";
-
-    RespCommand rcmd = { 0 };
-    StringBuilder sb = { 0 };
-
-    if (resp_try_parse(&rcmd, &sb, cmd, strlen(cmd))) {
-        printf("RespCommand {\n");
-        printf("    name: \"%s\",\n", rcmd.name);
-
-        char* args = rcmd.args;
-        for (int i = 0; i < rcmd.args_count; ++i) {
-            printf("    arg%d: \"%s\",\n", i, args);
-            args += strlen(args) + 1;
-        }
-        printf("}\n");
-    }
-
     CmdArgs args = parse_args(argc, argv);
     ServerContext ctx = { 0 };
     int err = server_context_create(&ctx, INADDR_LOCALHOST, args.port);

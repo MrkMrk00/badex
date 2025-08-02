@@ -23,11 +23,6 @@ typedef enum
       RESP_INVALID,
 } RespDataType;
 
-typedef enum
-{
-    RESP_CF_INVALID = 1 << 0,
-} RespCommandFlags;
-
 typedef struct
 {
     char name[24];
@@ -35,7 +30,10 @@ typedef struct
     uint8_t args_count;
 } RespCommand;
 
-#define RESP_CMD_IS_VALID(cmd) (~(cmd).flags & RESP_CF_INVALID)
+enum
+{
+    RESPERR_INVALID_LENGTH = -(1 << 0),
+};
 
 ssize_t resp_try_parse(RespCommand* cmd, StringBuilder* sb, const char* source, size_t source_len);
 
