@@ -5,7 +5,9 @@
 #include <string.h>
 #include <sys/socket.h>
 
-#include "./support/log.h"
+#include "redis/resp.h"
+#include "support/log.h"
+#include "support/structures.h"
 #include "tcp_server.h"
 
 typedef struct
@@ -15,7 +17,6 @@ typedef struct
     uint8_t io_thread_count;
 } CmdArgs;
 
-// === forward declarations
 static CmdArgs parse_args(int argc, char* argv[]);
 static void print_usage(FILE* file, const char* program_name);
 static RequestBuffer* request_buffer_create(int sock_fd);
@@ -24,6 +25,7 @@ static const uint32_t INADDR_LOCALHOST = (127 << 24) + 1;
 static const unsigned char EOT = 0x4;
 
 static RequestRingBuffer request_ring_buffer = { 0 };
+static StringBuilder string_builder = { 0 };
 
 static void on_ready(ServerContext* ctx, int sock_fd, uint32_t flags)
 {
@@ -35,37 +37,44 @@ static void on_ready(ServerContext* ctx, int sock_fd, uint32_t flags)
             rb = request_buffer_create(sock_fd);
         }
 
-        if (rb->size == 0) {
-            RequestRecvStatus status = request_buffer_recv(rb);
-            switch (status) {
-                case RB_RECV_OOM:
-                    BX_INFO("REQUEST TOO LARGE disconnecting client: %d\n", sock_fd);
-                    // fallthrough
+        RequestRecvStatus status = request_buffer_recv(rb);
+        switch (status) {
+            case RB_RECV_OOM:
+                BX_INFO("REQUEST TOO LARGE disconnecting client: %d\n", sock_fd);
+                // fallthrough
 
-                case RB_RECV_DISCONNECTED:
-                    server_disconnect_client(ctx, sock_fd);
-                    goto cleanup;
-            }
+            case RB_RECV_DISCONNECTED:
+                server_disconnect_client(ctx, sock_fd);
+                goto cleanup;
         }
 
-        if (rb->size == 1 && *rb->data == EOT) {
+        if (rb->size > 0 && rb->data[rb->size - 1] == EOT) {
             server_disconnect_client(ctx, sock_fd);
             goto cleanup;
         }
 
         // === everything was sucessfull -> we have a valid RequestBuffer
 
-        // null terminate -> be able to use as string
-        request_buffer_append(rb, "\0", 1);
+        RespCommand cmd = { 0 };
+        ssize_t new_offset = resp_try_parse(&cmd, &string_builder, rb->data, rb->size);
+        if (new_offset > 0) {
+            printf("%s", cmd.name);
+            for (int i = 0; i < cmd.args_count; ++i) {
+                int str_len = strlen(cmd.args);
+                printf(" %s ", cmd.args);
+                cmd.args += str_len + 1;
+            }
+            printf("\n");
 
-        if (strcmp(rb->data, "/close\r\n") == 0) {
-            server_close(ctx);
+            // didn't test, if it's correct :)
+            size_t size_to_copy = rb->size - new_offset;
+            if (size_to_copy > 0) {
+                memcpy(rb->data, rb->data + new_offset, size_to_copy);
+                rb->size = size_to_copy;
+            } else {
+                rb->size = 0;
+            }
         }
-
-        printf("=== %d says \"%s\" ===\n", sock_fd, rb->data);
-
-        // reuse the allocated request buffer for subsequent requests
-        rb->size = 0;
 
         // if there is no more space in the ring_buffer, we can just destroy it
         if (request_ring_buffer_put(&request_ring_buffer, rb)) {

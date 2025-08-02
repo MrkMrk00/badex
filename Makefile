@@ -7,6 +7,8 @@ SRCS        :=\
 	src/tcp_server.c\
 	src/request_buffer.c\
 	src/request_queue.c\
+	src/support/string_builder.c\
+	src/redis/resp_parser.c\
 
 BUILD_DIR   := build
 OBJS        := $(patsubst src/%.c, $(BUILD_DIR)/%.o, $(SRCS))
@@ -25,6 +27,7 @@ $(PROGRAM): $(OBJS)
 	$(CC) $(CFLAGS) $(OBJS) -o $@
 
 $(BUILD_DIR)/%.o: src/%.c | $(BUILD_DIR)
+	@[[ -d $(dir $@) ]] || mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INC_DIRS) -c $< -o $@
 
 $(BUILD_DIR):
