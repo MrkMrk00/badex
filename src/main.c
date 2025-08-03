@@ -1,9 +1,11 @@
+#include <errno.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <unistd.h>
 
 #include "redis/resp.h"
 #include "support/log.h"
@@ -19,7 +21,6 @@ typedef struct
 
 static CmdArgs parse_args(int argc, char* argv[]);
 static void print_usage(FILE* file, const char* program_name);
-static RequestBuffer* request_buffer_create(int sock_fd);
 
 static const uint32_t INADDR_LOCALHOST = (127 << 24) + 1;
 static const unsigned char EOT = 0x4;
@@ -30,25 +31,17 @@ static StringBuilder string_builder = { 0 };
 static void on_ready(ServerContext* ctx, int sock_fd, uint32_t flags)
 {
     RequestBuffer* rb = request_ring_buffer_pop(&request_ring_buffer, sock_fd);
+    if (rb == NULL) {
+        BX_ERROR("too many connections, no more space in the RequestBuffer! Skipping handling of FD %d\n", sock_fd);
+
+        return;
+    }
+    bool should_dispose = false;
 
     if (flags & CF_WANTS_READ) {
-        // initialize request buffer when the socket is ready to send data
-        if (rb == NULL) {
-            rb = request_buffer_create(sock_fd);
-        }
+        ssize_t bytes_received = request_buffer_recv(rb);
 
-        RequestRecvStatus status = request_buffer_recv(rb);
-        switch (status) {
-            case RB_RECV_OOM:
-                BX_INFO("REQUEST TOO LARGE disconnecting client: %d\n", sock_fd);
-                // fallthrough
-
-            case RB_RECV_DISCONNECTED:
-                server_disconnect_client(ctx, sock_fd);
-                goto cleanup;
-        }
-
-        if (rb->size > 0 && rb->data[rb->size - 1] == EOT) {
+        if (bytes_received <= 0 || rb->data[rb->size - 1] == EOT) {
             server_disconnect_client(ctx, sock_fd);
             goto cleanup;
         }
@@ -58,13 +51,7 @@ static void on_ready(ServerContext* ctx, int sock_fd, uint32_t flags)
         RespCommand cmd = { 0 };
         ssize_t new_offset = resp_try_parse(&cmd, &string_builder, rb->data, rb->size);
         if (new_offset > 0) {
-            printf("%s", cmd.name);
-            for (int i = 0; i < cmd.args_count; ++i) {
-                int str_len = strlen(cmd.args);
-                printf(" %s ", cmd.args);
-                cmd.args += str_len + 1;
-            }
-            printf("\n");
+            resp_print_command(&cmd);
 
             // didn't test, if it's correct :)
             size_t size_to_copy = rb->size - new_offset;
@@ -76,25 +63,41 @@ static void on_ready(ServerContext* ctx, int sock_fd, uint32_t flags)
             }
         }
 
-        // if there is no more space in the ring_buffer, we can just destroy it
-        if (request_ring_buffer_put(&request_ring_buffer, rb)) {
-            return;
-        }
+        should_dispose = rb->size == 0;
     }
 
-    if ((flags & CF_WANTS_WRITE) && rb != NULL) {
-        if (request_ring_buffer_put(&request_ring_buffer, rb)) {
-            return;
+    if (flags & CF_WANTS_WRITE && rb->size > 0) {
+        const char* response = "HTTP/1.1 200 OK\r\n"
+                               "Date: Sat, 02 Aug 2025 20:11:12 GMT\r\n"
+                               "Content-Type: text/plain; charset=UTF-8\r\n"
+                               "Content-Length: 18\r\n"
+                               "\r\n"
+                               "Ahoj z browseru :)";
+
+        if (send(sock_fd, response, strlen(response), MSG_NOSIGNAL) == -1) {
+            switch (errno) {
+                case EAGAIN:
+                case EINTR:
+                case ENETUNREACH:
+                case ENETDOWN:
+                case EPIPE:
+                case ECONNRESET:
+                    break;
+
+                default:
+                    BX_PFATAL("failed to send() data to client");
+            }
         }
+
+        server_disconnect_client(ctx, sock_fd);
+        should_dispose = true;
     }
 
-cleanup:
-    if (rb == NULL) {
+    if (!should_dispose) {
         return;
     }
-
+cleanup:
     request_buffer_dispose(rb);
-    free(rb);
 }
 
 int main(int argc, char* argv[])
@@ -109,17 +112,6 @@ int main(int argc, char* argv[])
     server_run(&ctx, on_ready);
 
     return 0;
-}
-
-static RequestBuffer* request_buffer_create(int sock_fd)
-{
-    RequestBuffer* rb = NULL;
-    BX_RTASSERT((rb = malloc(sizeof(RequestBuffer))) != NULL, "out of memory");
-
-    memset(rb, 0, sizeof(RequestBuffer));
-    rb->sock_fd = sock_fd;
-
-    return rb;
 }
 
 static CmdArgs parse_args(int argc, char* argv[])
