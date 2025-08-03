@@ -25,7 +25,7 @@ static void* _server_do_loop(void* arg);
 
 int server_context_create(ServerContext* ctx_out, uint32_t address, uint16_t port)
 {
-    BX_ASSERT(ctx_out != NULL, "expected a non-NULL ctx_out parameter");
+    BX_ASSERT(ctx_out != NULL, "expected a non-NULL ctx_out parameter\n");
 
     int sock_fd;
     BX_PASSERT((sock_fd = socket(AF_INET, SOCK_STREAM, 0)) != -1);
@@ -81,7 +81,7 @@ int server_context_create(ServerContext* ctx_out, uint32_t address, uint16_t por
 
 void server_run(ServerContext* ctx, OnReadyFunc on_ready)
 {
-    BX_ASSERT(!ctx->running, "the server was already started");
+    BX_ASSERT(!ctx->running, "the server was already started\n");
     ctx->on_ready = on_ready;
     ctx->running = true;
 
@@ -90,7 +90,7 @@ void server_run(ServerContext* ctx, OnReadyFunc on_ready)
 
 void server_disconnect_client(ServerContext* ctx, int client_sock_fd)
 {
-    BX_ASSERT(FD_ISSET(client_sock_fd, &ctx->client_fdset), "this socket fd is not manged by this server");
+    BX_ASSERT(FD_ISSET(client_sock_fd, &ctx->client_fdset), "this socket fd is not manged by this server\n");
     if (close(client_sock_fd) == -1) {
         BX_ERROR("(%s) IGNORED :: failed to close() client socket - %s\n", __func__, strerror(errno));
     }
@@ -128,6 +128,12 @@ static int accept_client(int server_sock_fd)
 
     // set the socket to not block
     BX_PASSERT(fcntl(client_fd, F_SETFL, fcntl(client_fd, F_GETFL, 0) | O_NONBLOCK) != -1);
+
+    // this is the way on BSD (MacOS/FreeBSD/...), on Linux there is a flag for the send() function
+#ifdef SO_NOSIGPIPE
+    int yes = 1;
+    setsockopt(client_fd, SOL_SOCKET, SO_NOSIGPIPE, (void*)&yes, sizeof(yes));
+#endif
 
 #ifdef DEBUG
 

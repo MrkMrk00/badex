@@ -29,6 +29,17 @@ static inline bool ensure_source_len(RespParser* p, size_t token_len);
 static long read_long(RespParser* p);
 static void read_string(RespParser* p, StringBuilder* sb, size_t expected_len);
 
+void resp_print_command(RespCommand* cmd)
+{
+    printf("%s", cmd->name);
+    for (int i = 0; i < cmd->args_count; ++i) {
+        int str_len = strlen(cmd->args);
+        printf(" %s ", cmd->args);
+        cmd->args += str_len + 1;
+    }
+    printf("\n");
+}
+
 /**
  * Makes quite a lot of allocations :/ (for now, will fix later)
  * And is ugly, but good for now.

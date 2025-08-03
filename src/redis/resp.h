@@ -36,5 +36,6 @@ enum
 };
 
 ssize_t resp_try_parse(RespCommand* cmd, StringBuilder* sb, const char* source, size_t source_len);
+void resp_print_command(RespCommand* cmd);
 
 #endif // !RESP_H
