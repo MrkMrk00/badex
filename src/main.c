@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -25,17 +26,35 @@ static void print_usage(FILE* file, const char* program_name);
 static const uint32_t INADDR_LOCALHOST = (127 << 24) + 1;
 static const unsigned char EOT = 0x4;
 
-static RequestRingBuffer request_ring_buffer = { 0 };
 static StringBuilder string_builder = { 0 };
 
-static void on_ready(ServerContext* ctx, int sock_fd, uint32_t flags)
-{
-    RequestBuffer* rb = request_ring_buffer_pop(&request_ring_buffer, sock_fd);
-    if (rb == NULL) {
-        BX_ERROR("too many connections, no more space in the RequestBuffer! Skipping handling of FD %d\n", sock_fd);
+static void io_queue_worker(ServerContext* ctx, int sock_fd, uint32_t flags);
+static void io_worker(ServerContext* ctx, RequestBuffer* rb, RequestQueueTask task);
 
-        return;
+int main(int argc, char* argv[])
+{
+    CmdArgs args = parse_args(argc, argv);
+    ServerContext* ctx = NULL;
+    RequestQueue* request_queue = NULL;
+
+    int err = server_context_create(&ctx, INADDR_LOCALHOST, args.port);
+    if (err < 0) {
+        BX_FATAL("failed to create server context - %s\n", strerror(-err));
     }
+
+    request_queue = request_queue_create(args.io_thread_count);
+    request_queue_run(request_queue, ctx, (RequestQueueWorker)io_worker);
+
+    server_run(ctx, io_queue_worker);
+
+    return 0;
+}
+
+static void io_worker(ServerContext* ctx, RequestBuffer* rb, RequestQueueTask task)
+{
+    ClientFlags flags = task.flags;
+    int sock_fd = task.sock_fd;
+
     bool should_dispose = false;
 
     if (flags & CF_WANTS_READ) {
@@ -89,6 +108,7 @@ static void on_ready(ServerContext* ctx, int sock_fd, uint32_t flags)
             }
         }
 
+        // TODO: mutex :/
         server_disconnect_client(ctx, sock_fd);
         should_dispose = true;
     }
@@ -98,20 +118,6 @@ static void on_ready(ServerContext* ctx, int sock_fd, uint32_t flags)
     }
 cleanup:
     request_buffer_dispose(rb);
-}
-
-int main(int argc, char* argv[])
-{
-    CmdArgs args = parse_args(argc, argv);
-    ServerContext ctx = { 0 };
-    int err = server_context_create(&ctx, INADDR_LOCALHOST, args.port);
-    if (err < 0) {
-        BX_FATAL("failed to create server context - %s\n", strerror(-err));
-    }
-
-    server_run(&ctx, on_ready);
-
-    return 0;
 }
 
 static CmdArgs parse_args(int argc, char* argv[])

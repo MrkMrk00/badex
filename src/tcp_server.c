@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,12 +21,27 @@
 #define FD_COPY(src, dest) memcpy((dest), (src), sizeof(fd_set))
 #endif
 
+struct server_context_t
+{
+    int sock_fd;
+    int max_fd;
+    bool running;
+    OnReadyFunc on_ready;
+
+    pthread_mutex_t mutex;
+
+    // get rid of these and replace with hash table or something
+    fd_set client_fdset;
+    fd_set busy_fds;
+};
+
 // Main loop
 static void* _server_do_loop(void* arg);
 
-int server_context_create(ServerContext* ctx_out, uint32_t address, uint16_t port)
+int server_context_create(ServerContext** ctx_out, uint32_t address, uint16_t port)
 {
-    BX_ASSERT(ctx_out != NULL, "expected a non-NULL ctx_out parameter\n");
+    ServerContext* ctx = malloc(sizeof(ServerContext));
+    BX_RTASSERT(ctx != NULL, "out of memory\n");
 
     int sock_fd;
     BX_PASSERT((sock_fd = socket(AF_INET, SOCK_STREAM, 0)) != -1);
@@ -74,9 +90,23 @@ int server_context_create(ServerContext* ctx_out, uint32_t address, uint16_t por
             CLIENT_QUEUE_MAX_SIZE);
 #endif
 
-    ctx_out->sock_fd = sock_fd;
+    ctx->sock_fd = sock_fd;
+    BX_PASSERT(pthread_mutex_init(&ctx->mutex, NULL) == 0);
 
     return 0;
+}
+
+void server_context_dispose(ServerContext** ctx_out)
+{
+    if (ctx_out == NULL || (*ctx_out) == NULL) {
+        return;
+    }
+
+    ServerContext* ctx = *ctx_out;
+
+    pthread_mutex_destroy(&ctx->mutex);
+    free(ctx);
+    (*ctx_out) = NULL;
 }
 
 void server_run(ServerContext* ctx, OnReadyFunc on_ready)
@@ -95,6 +125,14 @@ void server_disconnect_client(ServerContext* ctx, int client_sock_fd)
         BX_ERROR("(%s) IGNORED :: failed to close() client socket - %s\n", __func__, strerror(errno));
     }
     FD_CLR(client_sock_fd, &ctx->client_fdset);
+
+    // TODO: mutex :/
+    pthread_mutex_lock(&ctx->mutex);
+    {
+        FD_CLR(client_sock_fd, &ctx->busy_fds);
+    }
+    pthread_mutex_unlock(&ctx->mutex);
+
     BX_INFO("TCP server :: CLIENT_BYE { fd: %d }\n", client_sock_fd);
 }
 
@@ -151,6 +189,8 @@ static void* _server_do_loop(void* arg)
 
     fd_set read_fds, write_fds, error_fds;
     FD_ZERO(&ctx->client_fdset);
+    FD_ZERO(&ctx->busy_fds);
+
     FD_ZERO(&read_fds);
     FD_ZERO(&write_fds);
     FD_ZERO(&error_fds);
@@ -220,6 +260,18 @@ static void* _server_do_loop(void* arg)
             if (flags == 0) {
                 continue;
             }
+
+            // This will be slow, replace with atomics?
+            pthread_mutex_lock(&ctx->mutex);
+            {
+                if (FD_ISSET(fd, &ctx->busy_fds)) {
+                    ready--;
+                    continue;
+                } else {
+                    FD_SET(fd, &ctx->busy_fds);
+                }
+            }
+            pthread_mutex_unlock(&ctx->mutex);
 
             ctx->on_ready(ctx, fd, flags);
             ready--;
