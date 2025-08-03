@@ -41,7 +41,7 @@ void server_run(ServerContext*, OnReadyFunc on_ready);
 // Unset the `busy` flag from a FD and allow another thread
 // to handle the client. Should be called after all work was
 // done and there is nothing more to do with the client.
-void server_unblock_client(ServerContext*, int sock_fd);
+void server_unblock_client(ServerContext*, int sock_fd, ClientFlags flags);
 
 // Basically - close the socket.
 void server_disconnect_client(ServerContext*, int client_sock_fd);

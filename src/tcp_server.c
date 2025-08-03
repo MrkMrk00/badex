@@ -1,6 +1,7 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,19 +25,21 @@
 struct server_context_t
 {
     int sock_fd;
-    int max_fd;
     bool running;
     OnReadyFunc on_ready;
 
-    pthread_mutex_t mutex;
-
-    // get rid of these and replace with hash table or something
+#ifdef __APPLE__
+    int kqueue_fd;
+#else
+    int max_fd;
     fd_set client_fdset;
     fd_set busy_fds;
+    pthread_mutex_t mutex;
+#endif
 };
 
 // Main loop
-static void* _server_do_loop(void* arg);
+static void _server_do_loop(ServerContext* arg);
 
 int server_context_create(ServerContext** ctx_out, uint32_t address, uint16_t port)
 {
@@ -183,10 +186,88 @@ static int accept_client(int server_sock_fd)
     return client_fd;
 }
 
-static void* _server_do_loop(void* arg)
-{
-    ServerContext* ctx = (ServerContext*)arg;
+#ifdef __APPLE__
+#include <sys/event.h>
+#define KQUEUE_MAX_EVENTS 128
 
+static void _server_do_loop(ServerContext* ctx)
+{
+    BX_PASSERT((ctx->kqueue_fd = kqueue()) > 0);
+
+    struct kevent changeset = { 0 };
+    struct kevent eventset[KQUEUE_MAX_EVENTS] = { 0 };
+
+    // register the server socket for the EVFILT_READ
+    // when the server socket becomes readable -> a new incomming connection
+    // is waiting
+    EV_SET(&changeset, ctx->sock_fd, EVFILT_READ, EV_ADD, 0, 0, NULL);
+
+    while (ctx->running) {
+        int nevts = kevent(ctx->kqueue_fd, &changeset, 1, eventset, KQUEUE_MAX_EVENTS, NULL);
+        if (nevts == -1 && errno != EINTR) {
+            BX_PFATAL(NULL);
+        }
+
+        if (nevts <= 0) {
+            continue;
+        }
+
+        for (int i = 0; i < nevts; ++i) {
+            if (eventset[i].ident == ctx->sock_fd) {
+                int client_fd = -1;
+                while ((client_fd = accept_client(ctx->sock_fd)) != -1) {
+                    EV_SET(&changeset, client_fd, EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, NULL);
+                }
+
+                continue;
+            }
+
+            if (eventset[i].flags & EV_ERROR) {
+                int ev_errno = (int)eventset[i].data;
+                if (ev_errno != 0) {
+                    close(ev_errno);
+                    BX_ERROR("BSD loop :: got EV_ERROR from fd %lu: %s\n", eventset[i].ident, strerror(ev_errno));
+                }
+
+                continue;
+            }
+
+            ClientFlags flags = 0;
+            if (eventset[i].filter == EVFILT_READ) {
+                flags |= CF_WANTS_READ;
+            }
+
+            if (flags == 0) {
+                continue;
+            }
+
+            ctx->on_ready(ctx, eventset[i].ident, flags);
+        }
+    }
+}
+
+void server_unblock_client(ServerContext* ctx, int sock_fd, ClientFlags flags)
+{
+    struct kevent changeset = { 0 };
+    uint16_t ev_flags = 0;
+    if (flags & CF_WANTS_READ) {
+        ev_flags |= EVFILT_READ;
+    }
+    if (flags & CF_WANTS_WRITE) {
+        ev_flags |= EVFILT_WRITE;
+    }
+
+    if (ev_flags == 0) {
+        return;
+    }
+
+    EV_SET(&changeset, sock_fd, EV_ADD | EV_ONESHOT, ev_flags, 0, 0, NULL);
+    BX_PASSERT(kevent(ctx->kqueue_fd, &changeset, 1, NULL, 0, NULL) != -1);
+}
+
+#else
+static void _server_do_loop(ServerContext* ctx)
+{
     fd_set read_fds, write_fds, error_fds;
     FD_ZERO(&ctx->client_fdset);
     FD_ZERO(&ctx->busy_fds);
@@ -289,3 +370,4 @@ static void* _server_do_loop(void* arg)
 
     return NULL;
 }
+#endif
