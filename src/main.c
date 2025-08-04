@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <pthread.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -25,56 +26,81 @@ static void print_usage(FILE* file, const char* program_name);
 static const uint32_t INADDR_LOCALHOST = (127 << 24) + 1;
 static const unsigned char EOT = 0x4;
 
-static RequestRingBuffer request_ring_buffer = { 0 };
-static StringBuilder string_builder = { 0 };
+static RequestQueue* request_queue = NULL;
+static ClientFlags io_worker(ServerContext* ctx,
+                             StringBuilder* request,
+                             StringBuilder* response,
+                             RequestQueueTask task);
+static void queue_dispatcher(ServerContext* ctx, int sock_fd, ClientFlags flags);
 
-static void on_ready(ServerContext* ctx, int sock_fd, uint32_t flags)
+int main(int argc, char* argv[])
 {
-    RequestBuffer* rb = request_ring_buffer_pop(&request_ring_buffer, sock_fd);
-    if (rb == NULL) {
-        BX_ERROR("too many connections, no more space in the RequestBuffer! Skipping handling of FD %d\n", sock_fd);
+    CmdArgs args = parse_args(argc, argv);
+    ServerContext* ctx = NULL;
 
-        return;
+    int err = server_context_create(&ctx, INADDR_LOCALHOST, args.port);
+    if (err < 0) {
+        BX_FATAL("failed to create server context - %s\n", strerror(-err));
     }
-    bool should_dispose = false;
 
-    if (flags & CF_WANTS_READ) {
-        ssize_t bytes_received = request_buffer_recv(rb);
+    request_queue = request_queue_create(args.io_thread_count);
+    request_queue_run(request_queue, ctx, io_worker);
 
-        if (bytes_received <= 0 || rb->data[rb->size - 1] == EOT) {
-            server_disconnect_client(ctx, sock_fd);
-            goto cleanup;
+    server_run(ctx, queue_dispatcher);
+
+    request_queue_stop(request_queue);
+    request_queue_dispose(&request_queue);
+
+    return 0;
+}
+
+static void queue_dispatcher(ServerContext* ctx, int sock_fd, ClientFlags flags)
+{
+    BX_ASSERT(request_queue != NULL, "initialize request_queue first\n");
+    RequestQueueTask task = (RequestQueueTask){
+        .flags = flags,
+        .sock_fd = sock_fd,
+    };
+    request_queue_enqueue(request_queue, task);
+}
+
+static ClientFlags io_worker(ServerContext* ctx, StringBuilder* request, StringBuilder* response, RequestQueueTask task)
+{
+    ClientFlags next_flags = 0;
+
+    if (task.flags & CF_WANTS_READ) {
+        ssize_t bytes_received = sb_recv(request, task.sock_fd);
+        if (bytes_received <= 0 || request->memory[request->size - 1] == EOT) {
+            return 0;
+        }
+
+        if (request->size >= 4 && request->memory[0] == 'a' && request->memory[1] == 'h' && request->memory[2] == 'o' &&
+            request->memory[3] == 'j') {
+            next_flags |= CF_WANTS_WRITE;
+        } else {
+            next_flags |= CF_WANTS_READ;
         }
 
         // === everything was sucessfull -> we have a valid RequestBuffer
 
-        RespCommand cmd = { 0 };
-        ssize_t new_offset = resp_try_parse(&cmd, &string_builder, rb->data, rb->size);
-        if (new_offset > 0) {
-            resp_print_command(&cmd);
-
-            // didn't test, if it's correct :)
-            size_t size_to_copy = rb->size - new_offset;
-            if (size_to_copy > 0) {
-                memcpy(rb->data, rb->data + new_offset, size_to_copy);
-                rb->size = size_to_copy;
-            } else {
-                rb->size = 0;
-            }
-        }
-
-        should_dispose = rb->size == 0;
+        // TODO: redis parsing
+        // RespCommand cmd = { 0 };
+        // ssize_t new_offset = resp_try_parse(&cmd, &string_builder, request->memory, request->size);
+        // if (new_offset > 0) {
+        //     resp_print_command(&cmd);
+        //     sb_shift(&string_builder, new_offset);
+        // }
     }
 
-    if (flags & CF_WANTS_WRITE && rb->size > 0) {
-        const char* response = "HTTP/1.1 200 OK\r\n"
-                               "Date: Sat, 02 Aug 2025 20:11:12 GMT\r\n"
-                               "Content-Type: text/plain; charset=UTF-8\r\n"
-                               "Content-Length: 18\r\n"
-                               "\r\n"
-                               "Ahoj z browseru :)";
+    if (task.flags & CF_WANTS_WRITE && request->size > 0) {
+        const char* response_text = "HTTP/1.1 200 OK\r\n"
+                                    "Date: Sat, 02 Aug 2025 20:11:12 GMT\r\n"
+                                    "Content-Type: text/plain; charset=UTF-8\r\n"
+                                    "Content-Length: 18\r\n"
+                                    "\r\n"
+                                    "Ahoj z browseru :)";
 
-        if (send(sock_fd, response, strlen(response), MSG_NOSIGNAL) == -1) {
+        if (send(task.sock_fd, response_text, strlen(response_text), MSG_NOSIGNAL) == -1) {
             switch (errno) {
                 case EAGAIN:
                 case EINTR:
@@ -88,30 +114,9 @@ static void on_ready(ServerContext* ctx, int sock_fd, uint32_t flags)
                     BX_PFATAL("failed to send() data to client");
             }
         }
-
-        server_disconnect_client(ctx, sock_fd);
-        should_dispose = true;
     }
 
-    if (!should_dispose) {
-        return;
-    }
-cleanup:
-    request_buffer_dispose(rb);
-}
-
-int main(int argc, char* argv[])
-{
-    CmdArgs args = parse_args(argc, argv);
-    ServerContext ctx = { 0 };
-    int err = server_context_create(&ctx, INADDR_LOCALHOST, args.port);
-    if (err < 0) {
-        BX_FATAL("failed to create server context - %s\n", strerror(-err));
-    }
-
-    server_run(&ctx, on_ready);
-
-    return 0;
+    return next_flags;
 }
 
 static CmdArgs parse_args(int argc, char* argv[])

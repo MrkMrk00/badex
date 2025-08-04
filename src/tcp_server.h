@@ -1,6 +1,7 @@
 #ifndef TCP_SERVER_H_
 #define TCP_SERVER_H_
 
+#include "support/structures.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <sys/select.h>
@@ -14,33 +15,36 @@ enum
 {
     CF_WANTS_WRITE = 1 << 0,
     CF_WANTS_READ = 1 << 1,
+
+    // Stop condition
+    CF_STOP = 1 << 2,
 };
 
 typedef uint32_t ClientFlags;
+
 struct server_context_t;
+typedef struct server_context_t ServerContext;
 
 // Signature of the function, that gets called when a client is ready to
 // receive or send data to the server.
 typedef void (*OnReadyFunc)(struct server_context_t* ctx, int sock_fd, ClientFlags flags);
-
-typedef struct server_context_t
-{
-    int sock_fd;
-    int max_fd;
-    bool running;
-    fd_set client_fdset;
-    OnReadyFunc on_ready;
-} ServerContext;
 
 // Creates the server context.
 // - creates, binds and starts listening on the socket defined by `address` and `port`
 //
 // Returns: 0 on success; -errno on failure
 // If the reason for failing is out of the user's control, exits the program.
-int server_context_create(ServerContext* ctx_out, uint32_t address, uint16_t port);
+int server_context_create(ServerContext**, uint32_t address, uint16_t port);
+void server_context_dispose(ServerContext**);
 
 void server_run(ServerContext*, OnReadyFunc on_ready);
 
+// Unset the `busy` flag from a FD and allow another thread
+// to handle the client. Should be called after all work was
+// done and there is nothing more to do with the client.
+void server_unblock_client(ServerContext*, int sock_fd, ClientFlags flags);
+
+// Basically - close the socket.
 void server_disconnect_client(ServerContext*, int client_sock_fd);
 void server_close(ServerContext*);
 
@@ -56,44 +60,16 @@ typedef struct
 
 struct request_queue_t;
 typedef struct request_queue_t RequestQueue;
+typedef ClientFlags (*RequestQueueWorker)(ServerContext* context,
+                                          StringBuilder* request_buffer,
+                                          StringBuilder* response_buffer,
+                                          RequestQueueTask task);
 
-RequestQueue* request_queue_create(void);
+RequestQueue* request_queue_create(int worker_thread_count);
 void request_queue_dispose(RequestQueue**);
 
-void request_queue_enqueue(RequestQueue*, int client_sock_fd, ClientFlags flags);
-RequestQueueTask request_queue_pop(RequestQueue*);
-
-// =========================================================
-// Request buffering
-// =========================================================
-
-typedef struct
-{
-    int sock_fd;
-    char* data;
-    size_t size, capacity;
-} RequestBuffer;
-
-#define REQUEST_RING_BUF_MAX_INDEX UINT8_MAX
-
-// Maybe allocate me on the heap? or static?
-// There will most likely have to be a mutex here, if the server becomes multi-threaded. :/
-typedef struct
-{
-    RequestBuffer entries[REQUEST_RING_BUF_MAX_INDEX + 1];
-} RequestRingBuffer;
-
-// Read from socket and copy the data into the request buffer.
-// Returns the number of bytes that have been read.
-ssize_t request_buffer_recv(RequestBuffer*);
-
-// Returns the number of bytes, that can be copied into the buffer.
-// Returns 0 on failure - buffer is full, 0 bytes can be written.
-ssize_t request_buffer_append(RequestBuffer* rb, const char* data, size_t data_size);
-
-// Destructor.
-void request_buffer_dispose(RequestBuffer*);
-
-RequestBuffer* request_ring_buffer_pop(RequestRingBuffer*, int sock_fd);
+void request_queue_run(RequestQueue*, ServerContext* context, RequestQueueWorker worker);
+void request_queue_stop(RequestQueue*);
+void request_queue_enqueue(RequestQueue*, RequestQueueTask task);
 
 #endif // !TCP_SERVER_H_

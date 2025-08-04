@@ -20,8 +20,8 @@ typedef struct
     size_t offset;
 } RespParser;
 
-static inline char advance(RespParser* p);
-static inline char peek(RespParser* p);
+static inline signed char advance(RespParser* p);
+static inline signed char peek(RespParser* p);
 static inline bool match(RespParser* p, char ch);
 static inline bool match_rn(RespParser* p);
 static inline bool ensure_source_len(RespParser* p, size_t token_len);
@@ -139,7 +139,7 @@ ssize_t resp_try_parse(RespCommand* cmd, StringBuilder* sb, const char* source, 
 // returns LONG_MIN on failure
 static long read_long(RespParser* p)
 {
-    char ch;
+    signed char ch;
     // should not be longer that INT_MAX :)
     char cmd_len_buf[12] = { 0 };
     int lenbuf_index = 0;
@@ -188,7 +188,7 @@ static void read_string(RespParser* p, StringBuilder* sb, size_t expeceted_len)
     }
 }
 
-static inline char advance(RespParser* p)
+static inline signed char advance(RespParser* p)
 {
     if (p->offset >= p->source_len) {
         return EOF;
@@ -197,7 +197,7 @@ static inline char advance(RespParser* p)
     return p->source[p->offset++];
 }
 
-static inline char peek(RespParser* p)
+static inline signed char peek(RespParser* p)
 {
     if (p->offset >= p->source_len) {
         return EOF;

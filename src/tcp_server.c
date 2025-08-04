@@ -1,5 +1,7 @@
 #include <errno.h>
+#include <pthread.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,12 +22,29 @@
 #define FD_COPY(src, dest) memcpy((dest), (src), sizeof(fd_set))
 #endif
 
-// Main loop
-static void* _server_do_loop(void* arg);
-
-int server_context_create(ServerContext* ctx_out, uint32_t address, uint16_t port)
+struct server_context_t
 {
-    BX_ASSERT(ctx_out != NULL, "expected a non-NULL ctx_out parameter\n");
+    int sock_fd;
+    bool running;
+    OnReadyFunc on_ready;
+
+#ifdef __APPLE__
+    int kqueue_fd;
+#else
+    int max_fd;
+    fd_set client_fdset;
+    fd_set busy_fds;
+    pthread_mutex_t mutex;
+#endif
+};
+
+// Main loop
+static void _server_do_loop(ServerContext* arg);
+
+int server_context_create(ServerContext** ctx_out, uint32_t address, uint16_t port)
+{
+    ServerContext* ctx = malloc(sizeof(ServerContext));
+    BX_RTASSERT(ctx != NULL, "out of memory\n");
 
     int sock_fd;
     BX_PASSERT((sock_fd = socket(AF_INET, SOCK_STREAM, 0)) != -1);
@@ -74,9 +93,29 @@ int server_context_create(ServerContext* ctx_out, uint32_t address, uint16_t por
             CLIENT_QUEUE_MAX_SIZE);
 #endif
 
-    ctx_out->sock_fd = sock_fd;
+    ctx->sock_fd = sock_fd;
+#ifndef __APPLE__
+    BX_PASSERT(pthread_mutex_init(&ctx->mutex, NULL) == 0);
+#endif
+
+    (*ctx_out) = ctx;
 
     return 0;
+}
+
+void server_context_dispose(ServerContext** ctx_out)
+{
+    if (ctx_out == NULL || (*ctx_out) == NULL) {
+        return;
+    }
+
+    ServerContext* ctx = *ctx_out;
+
+#ifndef __APPLE__
+    pthread_mutex_destroy(&ctx->mutex);
+#endif
+    free(ctx);
+    (*ctx_out) = NULL;
 }
 
 void server_run(ServerContext* ctx, OnReadyFunc on_ready)
@@ -86,16 +125,6 @@ void server_run(ServerContext* ctx, OnReadyFunc on_ready)
     ctx->running = true;
 
     _server_do_loop((void*)ctx);
-}
-
-void server_disconnect_client(ServerContext* ctx, int client_sock_fd)
-{
-    BX_ASSERT(FD_ISSET(client_sock_fd, &ctx->client_fdset), "this socket fd is not manged by this server\n");
-    if (close(client_sock_fd) == -1) {
-        BX_ERROR("(%s) IGNORED :: failed to close() client socket - %s\n", __func__, strerror(errno));
-    }
-    FD_CLR(client_sock_fd, &ctx->client_fdset);
-    BX_INFO("TCP server :: CLIENT_BYE { fd: %d }\n", client_sock_fd);
 }
 
 void server_close(ServerContext* ctx)
@@ -145,12 +174,137 @@ static int accept_client(int server_sock_fd)
     return client_fd;
 }
 
-static void* _server_do_loop(void* arg)
-{
-    ServerContext* ctx = (ServerContext*)arg;
+#ifdef __APPLE__
+#include <sys/event.h>
+#define KQUEUE_MAX_EVENTS 128
 
+void server_disconnect_client(ServerContext* ctx, int client_sock_fd)
+{
+    // No need to remove the `client_sock_fd` from the kqueue.
+    // From the man(2) kqueue:
+    //     Calling close() on a file descriptor will remove any kevents that
+    //     reference the descriptor.
+
+    if (close(client_sock_fd) == -1) {
+        BX_ERROR("(%s) IGNORED :: failed to close() client socket - %s\n", __func__, strerror(errno));
+    } else {
+        BX_INFO("CLIENT BYE { fd: %d }\n", client_sock_fd);
+    }
+}
+
+static void _server_do_loop(ServerContext* ctx)
+{
+    BX_PASSERT((ctx->kqueue_fd = kqueue()) > 0);
+
+    struct kevent changeset[KQUEUE_MAX_EVENTS] = { 0 };
+    struct kevent eventset[KQUEUE_MAX_EVENTS] = { 0 };
+    int changeset_size = 0;
+
+    // register the server socket for the EVFILT_READ
+    // when the server socket becomes readable -> a new incomming connection
+    // is waiting
+    EV_SET(&changeset[changeset_size++], ctx->sock_fd, EVFILT_READ, EV_ADD, 0, 0, NULL);
+
+    while (ctx->running) {
+        int nevts = kevent(ctx->kqueue_fd, changeset, changeset_size, eventset, KQUEUE_MAX_EVENTS, NULL);
+        changeset_size = 0;
+        if (nevts == -1 && errno != EINTR) {
+            BX_PFATAL(NULL);
+        }
+
+        if (nevts <= 0) {
+            continue;
+        }
+
+        for (int i = 0; i < nevts; ++i) {
+            if (eventset[i].ident == ctx->sock_fd) {
+                int client_fd = -1;
+                while ((client_fd = accept_client(ctx->sock_fd)) != -1 && changeset_size < KQUEUE_MAX_EVENTS) {
+                    EV_SET(&changeset[changeset_size++], client_fd, EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, NULL);
+                }
+
+                continue;
+            }
+
+            if (eventset[i].flags & EV_ERROR) {
+                int ev_errno = (int)eventset[i].data;
+                if (ev_errno != 0) {
+                    BX_ERROR("BSD loop :: got EV_ERROR from fd %lu: %s\n", eventset[i].ident, strerror(ev_errno));
+                    server_disconnect_client(ctx, eventset[i].ident);
+                }
+
+                continue;
+            }
+
+            ClientFlags flags = 0;
+            if (eventset[i].filter == EVFILT_READ) {
+                flags |= CF_WANTS_READ;
+            }
+            if (eventset[i].filter == EVFILT_WRITE) {
+                flags |= CF_WANTS_WRITE;
+            }
+
+            if (flags == 0) {
+                continue;
+            }
+
+            ctx->on_ready(ctx, eventset[i].ident, flags);
+        }
+    }
+}
+
+void server_unblock_client(ServerContext* ctx, int sock_fd, ClientFlags flags)
+{
+    int n_changes = 0;
+    struct kevent changeset[2] = { 0 };
+
+    if (flags & CF_WANTS_READ) {
+        EV_SET(&changeset[n_changes++], sock_fd, EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, NULL);
+    }
+
+    if (flags & CF_WANTS_WRITE) {
+        EV_SET(&changeset[n_changes++], sock_fd, EVFILT_WRITE, EV_ADD | EV_ONESHOT, 0, 0, NULL);
+    }
+
+    if (n_changes > 0) {
+        BX_PASSERT(kevent(ctx->kqueue_fd, changeset, n_changes, NULL, 0, NULL) != -1);
+    }
+}
+
+#else
+void server_unblock_client(ServerContext* ctx, int sock_fd, ClientFlags flags)
+{
+    pthread_mutex_lock(&ctx->mutex);
+    {
+        FD_SET(sock_fd, &ctx->client_fdset);
+    }
+    pthread_mutex_unlock(&ctx->mutex);
+}
+
+void server_disconnect_client(ServerContext* ctx, int client_sock_fd)
+{
+    BX_ASSERT(FD_ISSET(client_sock_fd, &ctx->client_fdset), "this socket fd is not manged by this server\n");
+    if (close(client_sock_fd) == -1) {
+        BX_ERROR("(%s) IGNORED :: failed to close() client socket - %s\n", __func__, strerror(errno));
+    }
+    FD_CLR(client_sock_fd, &ctx->client_fdset);
+
+    // TODO: mutex :/
+    pthread_mutex_lock(&ctx->mutex);
+    {
+        FD_CLR(client_sock_fd, &ctx->busy_fds);
+    }
+    pthread_mutex_unlock(&ctx->mutex);
+
+    BX_INFO("TCP server :: CLIENT_BYE { fd: %d }\n", client_sock_fd);
+}
+
+static void _server_do_loop(ServerContext* ctx)
+{
     fd_set read_fds, write_fds, error_fds;
     FD_ZERO(&ctx->client_fdset);
+    FD_ZERO(&ctx->busy_fds);
+
     FD_ZERO(&read_fds);
     FD_ZERO(&write_fds);
     FD_ZERO(&error_fds);
@@ -221,6 +375,18 @@ static void* _server_do_loop(void* arg)
                 continue;
             }
 
+            // This will be slow, replace with atomics?
+            pthread_mutex_lock(&ctx->mutex);
+            {
+                if (FD_ISSET(fd, &ctx->busy_fds)) {
+                    ready--;
+                    continue;
+                } else {
+                    FD_SET(fd, &ctx->busy_fds);
+                }
+            }
+            pthread_mutex_unlock(&ctx->mutex);
+
             ctx->on_ready(ctx, fd, flags);
             ready--;
         }
@@ -234,6 +400,5 @@ static void* _server_do_loop(void* arg)
         close(fd);
         FD_CLR(fd, &ctx->client_fdset);
     }
-
-    return NULL;
 }
+#endif
