@@ -26,16 +26,14 @@ static void print_usage(FILE* file, const char* program_name);
 static const uint32_t INADDR_LOCALHOST = (127 << 24) + 1;
 static const unsigned char EOT = 0x4;
 
-static StringBuilder string_builder = { 0 };
-
-static void io_queue_worker(ServerContext* ctx, int sock_fd, uint32_t flags);
-static void io_worker(ServerContext* ctx, RequestBuffer* rb, RequestQueueTask task);
+static RequestQueue* request_queue = NULL;
+static void io_worker(ServerContext* ctx, StringBuilder* request, StringBuilder* response, RequestQueueTask task);
+static void queue_dispatcher(ServerContext* ctx, int sock_fd, ClientFlags flags);
 
 int main(int argc, char* argv[])
 {
     CmdArgs args = parse_args(argc, argv);
     ServerContext* ctx = NULL;
-    RequestQueue* request_queue = NULL;
 
     int err = server_context_create(&ctx, INADDR_LOCALHOST, args.port);
     if (err < 0) {
@@ -45,55 +43,57 @@ int main(int argc, char* argv[])
     request_queue = request_queue_create(args.io_thread_count);
     request_queue_run(request_queue, ctx, (RequestQueueWorker)io_worker);
 
-    server_run(ctx, io_queue_worker);
+    server_run(ctx, queue_dispatcher);
+
+    request_queue_stop(request_queue);
+    request_queue_dispose(&request_queue);
 
     return 0;
 }
 
-static void io_worker(ServerContext* ctx, RequestBuffer* rb, RequestQueueTask task)
+static void queue_dispatcher(ServerContext* ctx, int sock_fd, ClientFlags flags)
 {
-    ClientFlags flags = task.flags;
-    int sock_fd = task.sock_fd;
+    BX_ASSERT(request_queue != NULL, "initialize request_queue first\n");
+    RequestQueueTask task = (RequestQueueTask){
+        .flags = flags,
+        .sock_fd = sock_fd,
+    };
+    request_queue_enqueue(request_queue, task);
+}
 
-    bool should_dispose = false;
+static void io_worker(ServerContext* ctx, StringBuilder* request, StringBuilder* response, RequestQueueTask task)
+{
+    static StringBuilder string_builder = { 0 };
+    ClientFlags next_flags = 0;
 
-    if (flags & CF_WANTS_READ) {
-        ssize_t bytes_received = request_buffer_recv(rb);
+    if (task.flags & CF_WANTS_READ) {
+        ssize_t bytes_received = sb_recv(request, task.sock_fd);
 
-        if (bytes_received <= 0 || rb->data[rb->size - 1] == EOT) {
-            server_disconnect_client(ctx, sock_fd);
-            goto cleanup;
-        }
+        if (bytes_received <= 0 || request->memory[request->size - 1] == EOT) {
+            next_flags |= CF_WANTS_WRITE;
+        } else {
+            next_flags |= CF_WANTS_READ;
 
-        // === everything was sucessfull -> we have a valid RequestBuffer
+            // === everything was sucessfull -> we have a valid RequestBuffer
 
-        RespCommand cmd = { 0 };
-        ssize_t new_offset = resp_try_parse(&cmd, &string_builder, rb->data, rb->size);
-        if (new_offset > 0) {
-            resp_print_command(&cmd);
-
-            // didn't test, if it's correct :)
-            size_t size_to_copy = rb->size - new_offset;
-            if (size_to_copy > 0) {
-                memcpy(rb->data, rb->data + new_offset, size_to_copy);
-                rb->size = size_to_copy;
-            } else {
-                rb->size = 0;
+            RespCommand cmd = { 0 };
+            ssize_t new_offset = resp_try_parse(&cmd, &string_builder, request->memory, request->size);
+            if (new_offset > 0) {
+                resp_print_command(&cmd);
+                sb_shift(&string_builder, new_offset);
             }
         }
-
-        should_dispose = rb->size == 0;
     }
 
-    if (flags & CF_WANTS_WRITE && rb->size > 0) {
-        const char* response = "HTTP/1.1 200 OK\r\n"
-                               "Date: Sat, 02 Aug 2025 20:11:12 GMT\r\n"
-                               "Content-Type: text/plain; charset=UTF-8\r\n"
-                               "Content-Length: 18\r\n"
-                               "\r\n"
-                               "Ahoj z browseru :)";
+    if (task.flags & CF_WANTS_WRITE && request->size > 0) {
+        const char* response_text = "HTTP/1.1 200 OK\r\n"
+                                    "Date: Sat, 02 Aug 2025 20:11:12 GMT\r\n"
+                                    "Content-Type: text/plain; charset=UTF-8\r\n"
+                                    "Content-Length: 18\r\n"
+                                    "\r\n"
+                                    "Ahoj z browseru :)";
 
-        if (send(sock_fd, response, strlen(response), MSG_NOSIGNAL) == -1) {
+        if (send(task.sock_fd, response_text, strlen(response_text), MSG_NOSIGNAL) == -1) {
             switch (errno) {
                 case EAGAIN:
                 case EINTR:
@@ -107,17 +107,18 @@ static void io_worker(ServerContext* ctx, RequestBuffer* rb, RequestQueueTask ta
                     BX_PFATAL("failed to send() data to client");
             }
         }
-
-        // TODO: mutex :/
-        server_disconnect_client(ctx, sock_fd);
-        should_dispose = true;
     }
 
-    if (!should_dispose) {
+    if (next_flags != 0) {
+        server_unblock_client(ctx, task.sock_fd, next_flags);
+
         return;
     }
-cleanup:
-    request_buffer_dispose(rb);
+
+    // cleanup:
+    sb_reset(request);
+    sb_reset(response);
+    server_disconnect_client(ctx, task.sock_fd);
 }
 
 static CmdArgs parse_args(int argc, char* argv[])

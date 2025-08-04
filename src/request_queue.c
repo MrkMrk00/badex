@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "support/log.h"
+#include "support/structures.h"
 #include "tcp_server.h"
 
 #define REQUEST_QUEUE_SIZE 16
@@ -49,12 +50,43 @@ RequestQueue* request_queue_create(int worker_thread_count)
     return q;
 }
 
+#define MAX_BUFFERS 1024
+
+typedef struct
+{
+    int sock_fd;
+    StringBuilder req;
+    StringBuilder res;
+} RingBufferEntry;
+
+typedef RingBufferEntry IoRingBuffer[MAX_BUFFERS];
+
+static RingBufferEntry* io_ring_buffer_pop(IoRingBuffer* rb, int sock_fd)
+{
+    size_t optimal_index = sock_fd % MAX_BUFFERS;
+    size_t current_index = optimal_index;
+
+    RingBufferEntry* current;
+    do {
+        current = rb[current_index];
+        if (current->sock_fd == sock_fd || current->sock_fd <= 0) {
+            return current;
+        }
+
+        current_index = (current_index + 1) % MAX_BUFFERS;
+    } while (optimal_index != current_index);
+
+    return NULL;
+}
+
+// pthread main loop
 static void* task_dispatcher(void* arg)
 {
     // don't access anything inside of this without a mutex...
     RequestQueue* q = (RequestQueue*)arg;
-    RequestRingBuffer* ring_buffer = malloc(sizeof(RequestRingBuffer));
-    BX_RTASSERT(ring_buffer != NULL, "out of memory\n");
+
+    IoRingBuffer* io_ring_buffer = malloc(sizeof(IoRingBuffer));
+    BX_RTASSERT(io_ring_buffer != NULL, "out of memory\n");
 
     while (true) {
         RequestQueueTask task = request_queue_pop(q);
@@ -62,8 +94,8 @@ static void* task_dispatcher(void* arg)
             break;
         }
 
-        RequestBuffer* request_buffer = request_ring_buffer_pop(ring_buffer, task.sock_fd);
-        if (request_buffer == NULL) {
+        RingBufferEntry* socket_io = io_ring_buffer_pop(io_ring_buffer, task.sock_fd);
+        if (socket_io == NULL) {
             BX_ERROR("RequestRingBuffer out of memory, skipping running work for fd: %d\n", task.sock_fd);
 
             // return task back into the queue
@@ -72,10 +104,10 @@ static void* task_dispatcher(void* arg)
             continue;
         }
 
-        q->worker(q->worker_context, request_buffer, task);
+        q->worker(q->worker_context, &socket_io->req, &socket_io->res, task);
     }
 
-    free(ring_buffer);
+    free(io_ring_buffer);
     pthread_exit(NULL);
 }
 
@@ -86,6 +118,7 @@ void request_queue_run(RequestQueue* q, void* ctx, RequestQueueWorker worker)
 
     q->worker = worker;
     q->worker_context = ctx;
+    q->is_running = true;
 
     for (int i = 0; i < q->thread_count; ++i) {
         pthread_create(&q->threads[i], NULL, task_dispatcher, (void*)q);

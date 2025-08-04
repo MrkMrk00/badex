@@ -1,6 +1,7 @@
 #ifndef TCP_SERVER_H_
 #define TCP_SERVER_H_
 
+#include "support/structures.h"
 #include <stdbool.h>
 #include <stdint.h>
 #include <sys/select.h>
@@ -48,39 +49,6 @@ void server_disconnect_client(ServerContext*, int client_sock_fd);
 void server_close(ServerContext*);
 
 // =========================================================
-// Request buffering
-// =========================================================
-
-typedef struct
-{
-    int sock_fd;
-    char* data;
-    size_t size, capacity;
-} RequestBuffer;
-
-#define REQUEST_RING_BUF_MAX_INDEX UINT8_MAX
-
-// Maybe allocate me on the heap? or static?
-// There will most likely have to be a mutex here, if the server becomes multi-threaded. :/
-typedef struct
-{
-    RequestBuffer entries[REQUEST_RING_BUF_MAX_INDEX + 1];
-} RequestRingBuffer;
-
-// Read from socket and copy the data into the request buffer.
-// Returns the number of bytes that have been read.
-ssize_t request_buffer_recv(RequestBuffer*);
-
-// Returns the number of bytes, that can be copied into the buffer.
-// Returns 0 on failure - buffer is full, 0 bytes can be written.
-ssize_t request_buffer_append(RequestBuffer* rb, const char* data, size_t data_size);
-
-// Destructor.
-void request_buffer_dispose(RequestBuffer*);
-
-RequestBuffer* request_ring_buffer_pop(RequestRingBuffer*, int sock_fd);
-
-// =========================================================
 // Multi-threaded IO handling
 // =========================================================
 
@@ -92,7 +60,10 @@ typedef struct
 
 struct request_queue_t;
 typedef struct request_queue_t RequestQueue;
-typedef void (*RequestQueueWorker)(void* context, RequestBuffer* buffer, RequestQueueTask task);
+typedef void (*RequestQueueWorker)(void* context,
+                                   StringBuilder* request_buffer,
+                                   StringBuilder* response_buffer,
+                                   RequestQueueTask task);
 
 RequestQueue* request_queue_create(int worker_thread_count);
 void request_queue_dispose(RequestQueue**);
