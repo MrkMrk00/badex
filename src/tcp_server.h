@@ -60,15 +60,15 @@ typedef struct
 
 struct request_queue_t;
 typedef struct request_queue_t RequestQueue;
-typedef void (*RequestQueueWorker)(void* context,
-                                   StringBuilder* request_buffer,
-                                   StringBuilder* response_buffer,
-                                   RequestQueueTask task);
+typedef ClientFlags (*RequestQueueWorker)(ServerContext* context,
+                                          StringBuilder* request_buffer,
+                                          StringBuilder* response_buffer,
+                                          RequestQueueTask task);
 
 RequestQueue* request_queue_create(int worker_thread_count);
 void request_queue_dispose(RequestQueue**);
 
-void request_queue_run(RequestQueue*, void* context, RequestQueueWorker worker);
+void request_queue_run(RequestQueue*, ServerContext* context, RequestQueueWorker worker);
 void request_queue_stop(RequestQueue*);
 void request_queue_enqueue(RequestQueue*, RequestQueueTask task);
 

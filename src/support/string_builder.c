@@ -54,8 +54,9 @@ void sb_dispose(StringBuilder* sb)
 {
     BX_ASSERT(sb != NULL, "expected a non-NULL pointer to StringBuilder\n");
 
-    free(sb->memory);
-    memset(sb, 0, sizeof(StringBuilder));
+    if (sb->memory != NULL && sb->capacity > 0) {
+        free(sb->memory);
+    }
 }
 
 void sb_shift(StringBuilder* sb, size_t by)

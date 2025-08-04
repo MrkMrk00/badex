@@ -25,7 +25,7 @@ struct request_queue_t
     bool is_running; // the stop condition for the threads
 
     RequestQueueWorker worker;
-    void* worker_context;
+    ServerContext* worker_context;
 };
 
 static RequestQueueTask request_queue_pop(RequestQueue* q);
@@ -104,14 +104,39 @@ static void* task_dispatcher(void* arg)
             continue;
         }
 
-        q->worker(q->worker_context, &socket_io->req, &socket_io->res, task);
+        ClientFlags next_flags = q->worker(q->worker_context, &socket_io->req, &socket_io->res, task);
+
+        // Neither READ nor WRITE requested... Drain buffers and allow other FDs to use it, disconnect.
+        if (next_flags == 0) {
+            sb_reset(&socket_io->req);
+            sb_reset(&socket_io->res);
+            socket_io->sock_fd = 0;
+            server_disconnect_client(q->worker_context, task.sock_fd);
+
+            continue;
+        }
+
+        // if both drained, let other FDs use this IO buffer
+        if (socket_io->req.size == 0 && socket_io->res.size == 0) {
+            socket_io->sock_fd = 0;
+        } else {
+            socket_io->sock_fd = task.sock_fd;
+        }
+
+        // commit the flags into the event queue
+        server_unblock_client(q->worker_context, task.sock_fd, next_flags);
+    }
+
+    for (int i = 0; i < MAX_BUFFERS; ++i) {
+        sb_dispose(&io_ring_buffer[i]->req);
+        sb_dispose(&io_ring_buffer[i]->res);
     }
 
     free(io_ring_buffer);
     pthread_exit(NULL);
 }
 
-void request_queue_run(RequestQueue* q, void* ctx, RequestQueueWorker worker)
+void request_queue_run(RequestQueue* q, ServerContext* ctx, RequestQueueWorker worker)
 {
     BX_ASSERT(q->thread_count > 0, "cannot have negative thread_count :)\n");
     BX_ASSERT(!q->is_running, "the thread pool is already running\n");

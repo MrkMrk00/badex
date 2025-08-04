@@ -27,7 +27,10 @@ static const uint32_t INADDR_LOCALHOST = (127 << 24) + 1;
 static const unsigned char EOT = 0x4;
 
 static RequestQueue* request_queue = NULL;
-static void io_worker(ServerContext* ctx, StringBuilder* request, StringBuilder* response, RequestQueueTask task);
+static ClientFlags io_worker(ServerContext* ctx,
+                             StringBuilder* request,
+                             StringBuilder* response,
+                             RequestQueueTask task);
 static void queue_dispatcher(ServerContext* ctx, int sock_fd, ClientFlags flags);
 
 int main(int argc, char* argv[])
@@ -41,7 +44,7 @@ int main(int argc, char* argv[])
     }
 
     request_queue = request_queue_create(args.io_thread_count);
-    request_queue_run(request_queue, ctx, (RequestQueueWorker)io_worker);
+    request_queue_run(request_queue, ctx, io_worker);
 
     server_run(ctx, queue_dispatcher);
 
@@ -61,28 +64,32 @@ static void queue_dispatcher(ServerContext* ctx, int sock_fd, ClientFlags flags)
     request_queue_enqueue(request_queue, task);
 }
 
-static void io_worker(ServerContext* ctx, StringBuilder* request, StringBuilder* response, RequestQueueTask task)
+static ClientFlags io_worker(ServerContext* ctx, StringBuilder* request, StringBuilder* response, RequestQueueTask task)
 {
-    static StringBuilder string_builder = { 0 };
     ClientFlags next_flags = 0;
 
     if (task.flags & CF_WANTS_READ) {
         ssize_t bytes_received = sb_recv(request, task.sock_fd);
-
         if (bytes_received <= 0 || request->memory[request->size - 1] == EOT) {
+            return 0;
+        }
+
+        if (request->size >= 4 && request->memory[0] == 'a' && request->memory[1] == 'h' && request->memory[2] == 'o' &&
+            request->memory[3] == 'j') {
             next_flags |= CF_WANTS_WRITE;
         } else {
             next_flags |= CF_WANTS_READ;
-
-            // === everything was sucessfull -> we have a valid RequestBuffer
-
-            RespCommand cmd = { 0 };
-            ssize_t new_offset = resp_try_parse(&cmd, &string_builder, request->memory, request->size);
-            if (new_offset > 0) {
-                resp_print_command(&cmd);
-                sb_shift(&string_builder, new_offset);
-            }
         }
+
+        // === everything was sucessfull -> we have a valid RequestBuffer
+
+        // TODO: redis parsing
+        // RespCommand cmd = { 0 };
+        // ssize_t new_offset = resp_try_parse(&cmd, &string_builder, request->memory, request->size);
+        // if (new_offset > 0) {
+        //     resp_print_command(&cmd);
+        //     sb_shift(&string_builder, new_offset);
+        // }
     }
 
     if (task.flags & CF_WANTS_WRITE && request->size > 0) {
@@ -109,16 +116,7 @@ static void io_worker(ServerContext* ctx, StringBuilder* request, StringBuilder*
         }
     }
 
-    if (next_flags != 0) {
-        server_unblock_client(ctx, task.sock_fd, next_flags);
-
-        return;
-    }
-
-    // cleanup:
-    sb_reset(request);
-    sb_reset(response);
-    server_disconnect_client(ctx, task.sock_fd);
+    return next_flags;
 }
 
 static CmdArgs parse_args(int argc, char* argv[])
