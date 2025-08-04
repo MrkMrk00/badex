@@ -26,7 +26,7 @@ $(PROGRAM): $(OBJS)
 	$(CC) $(CFLAGS) $(OBJS) -o $@
 
 $(BUILD_DIR)/%.o: src/%.c | $(BUILD_DIR)
-	@[[ -d $(dir $@) ]] || mkdir -p $(dir $@)
+	@test -d $(dir $@) || mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) $(INC_DIRS) -c $< -o $@
 
 $(BUILD_DIR):

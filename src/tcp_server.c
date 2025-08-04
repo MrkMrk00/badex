@@ -272,6 +272,15 @@ void server_unblock_client(ServerContext* ctx, int sock_fd, ClientFlags flags)
 }
 
 #else
+void server_unblock_client(ServerContext* ctx, int sock_fd, ClientFlags flags)
+{
+    pthread_mutex_lock(&ctx->mutex);
+    {
+        FD_SET(sock_fd, &ctx->client_fdset);
+    }
+    pthread_mutex_unlock(&ctx->mutex);
+}
+
 void server_disconnect_client(ServerContext* ctx, int client_sock_fd)
 {
     BX_ASSERT(FD_ISSET(client_sock_fd, &ctx->client_fdset), "this socket fd is not manged by this server\n");
@@ -391,7 +400,5 @@ static void _server_do_loop(ServerContext* ctx)
         close(fd);
         FD_CLR(fd, &ctx->client_fdset);
     }
-
-    return NULL;
 }
 #endif
